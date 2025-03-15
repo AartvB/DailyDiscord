@@ -11,19 +11,8 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 GUILD = os.getenv('DISCORD_GUILD')
 CHANNEL = os.getenv('DISCORD_CHANNEL')
 
-conn = sqlite3.connect("DailyGamesPosts.db")
-cursor = conn.cursor()
-cursor.execute('''
-    CREATE TABLE IF NOT EXISTS posts (
-        id TEXT PRIMARY KEY
-    )
-''')
-conn.commit()
-conn.close()
-
 reddit = praw.Reddit('bot1')
 reddit.validate_on_submit = True
-
 subreddit = reddit.subreddit("dailygames")
 
 def doLinkCheck():
@@ -37,10 +26,7 @@ def doLinkCheck():
         linked_to_post = cursor.fetchone()[0] > 0
 
         if not linked_to_post and int(post.created_utc) < int(time.time()) - 5*60:
-            cursor.execute('''
-                INSERT INTO posts (id)
-                VALUES (?)
-            ''', (post.id,))
+            cursor.execute("INSERT INTO posts (id) VALUES (?)", (post.id,))
             conn.commit()
 
             client = discord.Client(intents=discord.Intents.default())
@@ -53,15 +39,10 @@ def doLinkCheck():
                             if channel.name == CHANNEL:
                                 await channel.send('u/{author} has created a new post called "{title}". You can find it here: https://www.reddit.com/r/dailygames/comments/{id}/'.format(author=post.author.name.translate(str.maketrans({'_':  r'\_', '*':  r'\*', '~':  r'\~'})) if post.author else '[deleted]',title=post.title.translate(str.maketrans({'_':  r'\_', '*':  r'\*', '~':  r'\~'})),id=post.id))
                                 await client.close() 
-
             client.run(TOKEN)
-
     conn.close()
 
-# Schedule the function to run every minute
 schedule.every(1).minute.do(doLinkCheck)
-
-# Keep the script running to check for scheduled tasks
 while True:
     schedule.run_pending()
     time.sleep(1)
