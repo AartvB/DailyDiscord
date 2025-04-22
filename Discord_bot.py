@@ -44,5 +44,9 @@ def doLinkCheck():
 
 schedule.every(1).minute.do(doLinkCheck)
 while True:
-    schedule.run_pending()
-    time.sleep(1)
+    try:
+        schedule.run_pending()
+        time.sleep(1)
+    except Exception as e:
+        print(e)
+        pass
