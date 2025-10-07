@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 import asyncpraw
 import sqlite3
 import smtplib
+import time
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
@@ -195,6 +196,11 @@ async def perform_bot_action_from_distance(client):
                     cursor.execute("INSERT OR IGNORE INTO series (name) VALUES (?)", (series_name,))
                     conn.commit()
                     conn.close()
+                    for guild in client.guilds:
+                        if guild.name == GUILD:
+                            for channel in guild.channels:
+                                if channel.name == CHANNEL:
+                                    await channel.send(f"It is now possible to subscribe to the series named {series_name}!")
                     print(f"Series '{series_name}' added to database.")
                 elif content.startswith('addPostToSeries(') and content.endswith(')'):
                     args = content[len('addPostToSeries("'):-2]
