@@ -38,10 +38,14 @@ def send_email(subject, body):
 
 # Autocomplete helpers
 async def autocomplete_subscribe(interaction: discord.Interaction, current: str):
+    user_id = interaction.user.id
     conn = sqlite3.connect("DailyGamesPosts.db")
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM series WHERE name LIKE ?", (f"{current}%",))
     results = [row[0] for row in cursor.fetchall()]
+    cursor.execute("SELECT seriesname FROM subscriptions WHERE userid = ? AND seriesname LIKE ? AND platform = 'discord'", (user_id, f"{current}%"))
+    subscriptions = [row[0] for row in cursor.fetchall()]
+    results = [name for name in results if name not in subscriptions]
     conn.close()
     return [discord.app_commands.Choice(name=name, value=name) for name in results[:25]]  # Max 25 choices
 
@@ -132,6 +136,7 @@ async def doLinkCheck(client):
                 cursor.execute("INSERT INTO posts (id) VALUES (?)", (post.id,))
                 send_email("Series of post not recognized!",f"The series of post {post.id} with title {post.title} can be any one of the following: {matched_series}")
             else:
+                message += f"\nI think it is part of the series named {matched_series[0]}."
                 cursor.execute("INSERT INTO posts (id, seriesname) VALUES (?, ?)", (post.id,matched_series[0]))
                 cursor.execute("SELECT userid FROM subscriptions WHERE seriesname = ? AND platform = 'discord'", (matched_series[0],))
                 user_ids = [int(row[0]) for row in cursor.fetchall()]
@@ -142,7 +147,7 @@ async def doLinkCheck(client):
                             if member.id in user_ids:
                                 tags.append(member.mention)
                 if tags:
-                    message += f"\nI think it is part of the series named {matched_series[0]}.\nMembers subscribed to this DailyGame: " + " ".join(tags)
+                    message += f"\nCircadians subscribed to this DailyGame: " + " ".join(tags)
             conn.commit()
             for guild in client.guilds:
                 if guild.name == GUILD:
@@ -231,7 +236,9 @@ async def perform_bot_action_from_distance(client):
                                                     for member in guild.members:
                                                         if member.id in user_ids:
                                                             tags.append(member.mention)
-                                                    reply = f"I first did not (correctly) recognize the series of this post, but I do recognize it now.\nIt is part of the series named {series_name}.\nUsers subscribed to this series: {' '.join(tags) if tags else 'None'}"
+                                                    reply = f"I first did not (correctly) recognize the series of this post, but I do recognize it now.\nIt is part of the series named {series_name}."
+                                                    if tags:
+                                                        reply += f"\nCircadians subscribed to this series: " + " ".join(tags)
                                                     await msg.reply(reply)
                                                     break
 
