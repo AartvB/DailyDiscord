@@ -246,6 +246,32 @@ async def perform_bot_action_from_distance(client):
                         print("Post or Series not recognized!")
                     conn.commit()
                     conn.close()
+                elif content.startswith('renameSeries(') and content.endswith(')'):
+                    args = content[len('renameSeries("'):-2]
+                    old_name, new_name = args.split('","')
+                    conn = sqlite3.connect("DailyGamesPosts.db")
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT 1 FROM series WHERE name = ?", (old_name,))
+                    old_exists = cursor.fetchone()
+                    if not old_exists:
+                        print(f"Series '{old_name}' not found.")
+                    else:
+                        cursor.execute("SELECT 1 FROM series WHERE name = ?", (new_name,))
+                        new_exists = cursor.fetchone()
+                        if new_exists:
+                            print(f"Series '{new_name}' already exists.")
+                        else:
+                            cursor.execute("UPDATE series SET name = ? WHERE name = ?", (new_name, old_name))
+                            cursor.execute("UPDATE subscriptions SET seriesname = ? WHERE seriesname = ?", (new_name, old_name))
+                            cursor.execute("UPDATE posts SET seriesname = ? WHERE seriesname = ?", (new_name, old_name))
+                            conn.commit()
+                            print(f"Series '{old_name}' renamed to '{new_name}'.")
+                            for guild in client.guilds:
+                                if guild.name == GUILD:
+                                    for channel in guild.channels:
+                                        if channel.name == CHANNEL:
+                                            await channel.send(f"The series '{old_name}' has been renamed to '{new_name}'.")
+                    conn.close()
                 else:
                     print("Action not recognized")
                 os.remove(filename)
