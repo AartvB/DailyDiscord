@@ -41,9 +41,9 @@ async def autocomplete_subscribe(interaction: discord.Interaction, current: str)
     user_id = interaction.user.id
     conn = sqlite3.connect("DailyGamesPosts.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT name FROM series WHERE name LIKE ?", (f"{current}%",))
+    cursor.execute("SELECT name FROM series WHERE LOWER(name) LIKE ?", (f"{current.lower()}%",))
     results = [row[0] for row in cursor.fetchall()]
-    cursor.execute("SELECT seriesname FROM subscriptions WHERE userid = ? AND seriesname LIKE ? AND platform = 'discord'", (user_id, f"{current}%"))
+    cursor.execute("SELECT seriesname FROM subscriptions WHERE userid = ? AND LOWER(seriesname) LIKE ? AND platform = 'discord'", (user_id, f"{current.lower()}%"))
     subscriptions = [row[0] for row in cursor.fetchall()]
     results = [name for name in results if name not in subscriptions]
     conn.close()
@@ -53,7 +53,7 @@ async def autocomplete_unsubscribe(interaction: discord.Interaction, current: st
     user_id = interaction.user.id
     conn = sqlite3.connect("DailyGamesPosts.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT seriesname FROM subscriptions WHERE userid = ? AND seriesname LIKE ? AND platform = 'discord'", (user_id, f"{current}%"))
+    cursor.execute("SELECT seriesname FROM subscriptions WHERE userid = ? AND LOWER(seriesname) LIKE ? AND platform = 'discord'", (user_id, f"{current.lower()}%"))
     results = [row[0] for row in cursor.fetchall()]
     conn.close()
     return [discord.app_commands.Choice(name=name, value=name) for name in results[:25]]  # Max 25 choices
@@ -74,12 +74,14 @@ class MyClient(discord.Client):
             conn = sqlite3.connect("DailyGamesPosts.db")
             cursor = conn.cursor()
             cursor.execute("SELECT name FROM series")
-            series_names = [row[0] for row in cursor.fetchall()]
-            if text not in series_names:
-                await interaction.response.send_message(f"Series '{text}' not found. Available series: {', '.join(series_names)}", ephemeral=True)
+            series_rows = [row[0] for row in cursor.fetchall()]
+            series_map = {name.lower(): name for name in series_rows}
+            if text.lower() not in series_map:
+                await interaction.response.send_message(f"Series '{text}' not found. Available series: {', '.join(series_rows)}", ephemeral=True)
                 conn.close()
-                return            
-            cursor.execute("INSERT OR IGNORE INTO subscriptions (userid, seriesname, platform) VALUES (?, ?, 'discord')", (interaction.user.id, text))
+                return
+            actual_name = series_map[text.lower()]
+            cursor.execute("INSERT OR IGNORE INTO subscriptions (userid, seriesname, platform) VALUES (?, ?, 'discord')", (interaction.user.id, actual_name))
             conn.commit()
             conn.close()
             await interaction.response.send_message(f"You have subscribed to '{text}'.", ephemeral=True)
@@ -91,13 +93,14 @@ class MyClient(discord.Client):
             user_id = interaction.user.id
             conn = sqlite3.connect("DailyGamesPosts.db")
             cursor = conn.cursor()
-            cursor.execute("SELECT 1 FROM subscriptions WHERE userid = ? AND seriesname = ? AND platform = 'discord'", (user_id, text))
-            is_subscribed = cursor.fetchone()
-            if not is_subscribed:
+            cursor.execute("SELECT seriesname FROM subscriptions WHERE userid = ? AND platform = 'discord'", (user_id,))
+            subs = [row[0] for row in cursor.fetchall()]
+            matching = next((s for s in subs if s.lower() == text.lower()), None)
+            if not matching:
                 await interaction.response.send_message(f"You are not subscribed to '{text}'.", ephemeral=True)
                 conn.close()
             else:
-                cursor.execute("DELETE FROM subscriptions WHERE userid = ? AND seriesname = ? AND platform = 'discord'", (user_id, text))
+                cursor.execute("DELETE FROM subscriptions WHERE userid = ? AND LOWER(seriesname) = LOWER(?) AND platform = 'discord'", (user_id, text))
                 conn.commit()
                 conn.close()
                 await interaction.response.send_message(f"You have unsubscribed from '{text}'.", ephemeral=True)
@@ -138,7 +141,7 @@ async def doLinkCheck(client):
             else:
                 message += f"\nI think it is part of the series named {matched_series[0]}."
                 cursor.execute("INSERT INTO posts (id, seriesname) VALUES (?, ?)", (post.id,matched_series[0]))
-                cursor.execute("SELECT userid FROM subscriptions WHERE seriesname = ? AND platform = 'discord'", (matched_series[0],))
+                cursor.execute("SELECT userid FROM subscriptions WHERE LOWER(seriesname) = LOWER(?) AND platform = 'discord'", (matched_series[0],))
                 user_ids = [int(row[0]) for row in cursor.fetchall()]
                 tags = []
                 for guild in client.guilds:
@@ -198,8 +201,13 @@ async def perform_bot_action_from_distance(client):
                     series_name = content[len('addSeries("'):-2]
                     conn = sqlite3.connect("DailyGamesPosts.db")
                     cursor = conn.cursor()
-                    cursor.execute("INSERT OR IGNORE INTO series (name) VALUES (?)", (series_name,))
-                    conn.commit()
+                    cursor.execute("SELECT name FROM series WHERE LOWER(name) = LOWER(?)", (series_name,))
+                    existing = cursor.fetchone()
+                    if existing:
+                        print(f"Series '{series_name}' already exists as '{existing[0]}'.")
+                    else:
+                        cursor.execute("INSERT INTO series (name) VALUES (?)", (series_name,))
+                        conn.commit()
                     conn.close()
                     for guild in client.guilds:
                         if guild.name == GUILD:
@@ -214,14 +222,17 @@ async def perform_bot_action_from_distance(client):
                     cursor = conn.cursor()
                     cursor.execute("SELECT 1 FROM posts WHERE id = ?", (postid,))
                     post_exists = cursor.fetchone()
-                    cursor.execute("SELECT 1 FROM series WHERE name = ?", (series_name,))
-                    series_exists = cursor.fetchone()
+                    cursor.execute("SELECT name FROM series WHERE LOWER(name) = LOWER(?)", (series_name,))
+                    series_row = cursor.fetchone()
+                    series_exists = series_row is not None
+                    if series_row:
+                        series_name = series_row[0]
                     if post_exists and series_exists:
                         cursor.execute("UPDATE posts SET seriesname = ? WHERE id = ?",(series_name, postid))
                         conn.commit()
                         print(f"Post '{postid}' assigned to series '{series_name}'.")
 
-                        cursor.execute("SELECT userid FROM subscriptions WHERE seriesname = ? AND platform = 'discord'", (series_name,))
+                        cursor.execute("SELECT userid FROM subscriptions WHERE LOWER(seriesname) = LOWER(?) AND platform = 'discord'", (series_name,))
                         user_ids = [int(row[0]) for row in cursor.fetchall()]
                         if (len(user_ids) > 0):
                             for guild in client.guilds:
@@ -251,19 +262,23 @@ async def perform_bot_action_from_distance(client):
                     old_name, new_name = args.split('","')
                     conn = sqlite3.connect("DailyGamesPosts.db")
                     cursor = conn.cursor()
-                    cursor.execute("SELECT 1 FROM series WHERE name = ?", (old_name,))
-                    old_exists = cursor.fetchone()
+                    cursor.execute("SELECT name FROM series WHERE LOWER(name) = LOWER(?)", (old_name,))
+                    old_row = cursor.fetchone()
+                    old_exists = old_row is not None
+                    if old_row:
+                        old_name = old_row[0]
                     if not old_exists:
                         print(f"Series '{old_name}' not found.")
                     else:
-                        cursor.execute("SELECT 1 FROM series WHERE name = ?", (new_name,))
-                        new_exists = cursor.fetchone()
-                        if new_exists:
+                        cursor.execute("SELECT name FROM series WHERE LOWER(name) = LOWER(?)", (new_name,))
+                        new_row = cursor.fetchone()
+                        new_exists = new_row is not None
+                        if new_exists and (new_row[0].lower() != old_name.lower()):
                             print(f"Series '{new_name}' already exists.")
                         else:
-                            cursor.execute("UPDATE series SET name = ? WHERE name = ?", (new_name, old_name))
-                            cursor.execute("UPDATE subscriptions SET seriesname = ? WHERE seriesname = ?", (new_name, old_name))
-                            cursor.execute("UPDATE posts SET seriesname = ? WHERE seriesname = ?", (new_name, old_name))
+                            cursor.execute("UPDATE series SET name = ? WHERE LOWER(name) = LOWER(?)", (new_name, old_name))
+                            cursor.execute("UPDATE subscriptions SET seriesname = ? WHERE LOWER(seriesname) = LOWER(?)", (new_name, old_name))
+                            cursor.execute("UPDATE posts SET seriesname = ? WHERE LOWER(seriesname) = LOWER(?)", (new_name, old_name))
                             conn.commit()
                             print(f"Series '{old_name}' renamed to '{new_name}'.")
                             for guild in client.guilds:
