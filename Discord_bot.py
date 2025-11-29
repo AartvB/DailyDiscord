@@ -146,7 +146,7 @@ async def doLinkCheck(client):
                         for member in guild.members:
                             if member.id in user_ids:
                                 tags.append(member.mention)
-                if tags:
+                if len(tags) > 0:
                     message += f"\nCircadians subscribed to this DailyGame: " + " ".join(tags)
             conn.commit()
             for guild in client.guilds:
@@ -237,7 +237,7 @@ async def perform_bot_action_from_distance(client):
                                                         if member.id in user_ids:
                                                             tags.append(member.mention)
                                                     reply = f"I first did not (correctly) recognize the series of this post, but I do recognize it now.\nIt is part of the series named {series_name}."
-                                                    if tags:
+                                                    if len(tags) > 0:
                                                         reply += f"\nCircadians subscribed to this series: " + " ".join(tags)
                                                     await msg.reply(reply)
                                                     break
