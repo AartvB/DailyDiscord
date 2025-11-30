@@ -46,6 +46,7 @@ async def autocomplete_subscribe(interaction: discord.Interaction, current: str)
     cursor.execute("SELECT seriesname FROM subscriptions WHERE userid = ? AND LOWER(seriesname) LIKE ? AND platform = 'discord'", (user_id, f"{current.lower()}%"))
     subscriptions = [row[0] for row in cursor.fetchall()]
     results = [name for name in results if name not in subscriptions]
+    results.sort(key=str.casefold)
     conn.close()
     return [discord.app_commands.Choice(name=name, value=name) for name in results[:25]]  # Max 25 choices
 
@@ -55,6 +56,7 @@ async def autocomplete_unsubscribe(interaction: discord.Interaction, current: st
     cursor = conn.cursor()
     cursor.execute("SELECT seriesname FROM subscriptions WHERE userid = ? AND LOWER(seriesname) LIKE ? AND platform = 'discord'", (user_id, f"{current.lower()}%"))
     results = [row[0] for row in cursor.fetchall()]
+    results.sort(key=str.casefold)
     conn.close()
     return [discord.app_commands.Choice(name=name, value=name) for name in results[:25]]  # Max 25 choices
 
