@@ -1,3 +1,4 @@
+from email.mime import text
 import os
 import discord
 import asyncio
@@ -8,6 +9,7 @@ import smtplib
 import time
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import re
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -60,13 +62,22 @@ async def autocomplete_unsubscribe(interaction: discord.Interaction, current: st
     conn.close()
     return [discord.app_commands.Choice(name=name, value=name) for name in results[:25]]  # Max 25 choices
 
+async def autocomplete_all_series(interaction: discord.Interaction, current: str):
+    conn = sqlite3.connect("DailyGamesPosts.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM series WHERE LOWER(name) LIKE ?", (f"{current.lower()}%",))
+    results = [row[0] for row in cursor.fetchall()]
+    results.sort(key=str.casefold)
+    conn.close()
+    return [discord.app_commands.Choice(name=name, value=name) for name in results[:25]]  # Max 25 choices
+
 class MyClient(discord.Client):
     async def setup_hook(self):
         self.reddit = asyncpraw.Reddit('bot1')
         self.subreddit = await self.reddit.subreddit("dailygames")
         self.bg_task = self.loop.create_task(background_task(self))
         self.txt_task = self.loop.create_task(process_txt_files(self))
-        self.perform_bot_action_task = self.loop.create_task(perform_bot_action_from_distance(self))
+#        self.perform_bot_action_task = self.loop.create_task(perform_bot_action_from_distance(self))
         self.tree = discord.app_commands.CommandTree(self)
 
         @self.tree.command(name="subscribe", description="Subscribe to a DailyGame")
@@ -119,6 +130,116 @@ class MyClient(discord.Client):
                 await interaction.response.send_message(f"You are subscribed to: {', '.join(subscriptions)}", ephemeral=True)
             else:
                 await interaction.response.send_message("You are not subscribed to any series.", ephemeral=True)
+
+        @self.tree.command(name="addseries", description="Add a new DailyGame to subscribe to")
+        @discord.app_commands.describe(text="The name of the new series")
+        @discord.app_commands.checks.has_role('Botbouwer')
+        async def addSeries(interaction: discord.Interaction, text: str):
+            conn = sqlite3.connect("DailyGamesPosts.db")
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM series WHERE LOWER(name) = LOWER(?)", (text,))
+            existing = cursor.fetchone()
+            if existing:
+                await interaction.response.send_message(f"Series '{text}' already exists as '{existing[0]}'.", ephemeral=True)
+            else:
+                cursor.execute("INSERT INTO series (name) VALUES (?)", (text,))
+                conn.commit()
+                await interaction.response.send_message(f"Users can now subscribe to series '{text}'.", ephemeral=True)
+                for guild in client.guilds:
+                    if guild.name == GUILD:
+                        for channel in guild.channels:
+                            if channel.name == CHANNEL:
+                                await channel.send(f"It is now possible to subscribe to the series named {text}!")
+            send_email("New series added!",f"The series '{text}' has been added to the database by {interaction.user.name}.")
+            conn.close()
+
+        @self.tree.command(name="renameseries", description="Rename a DailyGame")
+        @discord.app_commands.describe(old_name="The current name of the series", new_name="The new name for the series")
+        @discord.app_commands.autocomplete(old_name=autocomplete_all_series)
+        @discord.app_commands.checks.has_role('Botbouwer')
+        async def renameSeries(interaction: discord.Interaction, old_name: str, new_name: str):
+            conn = sqlite3.connect("DailyGamesPosts.db")
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM series WHERE LOWER(name) = LOWER(?)", (old_name,))
+            old_row = cursor.fetchone()
+            old_exists = old_row is not None
+            if old_row:
+                old_name = old_row[0]
+            if not old_exists:
+                await interaction.response.send_message(f"Series '{old_name}' not found.", ephemeral=True)
+            else:
+                cursor.execute("SELECT name FROM series WHERE LOWER(name) = LOWER(?)", (new_name,))
+                new_row = cursor.fetchone()
+                new_exists = new_row is not None
+                if new_exists and (new_row[0].lower() != old_name.lower()):
+                    await interaction.response.send_message(f"Series '{new_name}' already exists.", ephemeral=True)
+                else:
+                    cursor.execute("UPDATE series SET name = ? WHERE LOWER(name) = LOWER(?)", (new_name, old_name))
+                    cursor.execute("UPDATE subscriptions SET seriesname = ? WHERE LOWER(seriesname) = LOWER(?)", (new_name, old_name))
+                    cursor.execute("UPDATE posts SET seriesname = ? WHERE LOWER(seriesname) = LOWER(?)", (new_name, old_name))
+                    conn.commit()
+                    await interaction.response.send_message(f"You renamed Series '{old_name}' to '{new_name}'.", ephemeral=True)
+                    for guild in client.guilds:
+                        if guild.name == GUILD:
+                            for channel in guild.channels:
+                                if channel.name == CHANNEL:
+                                    await channel.send(f"The series '{old_name}' has been renamed to '{new_name}'.")
+            send_email("Series renamed!",f"The series '{old_name}' has been renamed to '{new_name}' by {interaction.user.name}.")
+            conn.close()
+
+        @self.tree.command(name="addposttoseries", description="Add a post to a series")
+        @discord.app_commands.describe(series_name="The name of the series to add the post to")
+        @discord.app_commands.autocomplete(series_name=autocomplete_all_series)
+        @discord.app_commands.checks.has_role('Botbouwer')
+        async def addposttoseries(interaction: discord.Interaction, series_name: str, reddit_link: str):
+            match = re.search(r'comments/([a-z0-9]+)/', reddit_link)
+            if not match:
+                await interaction.response.send_message("Invalid Reddit link format. Please provide a link to a DailyGames post.", ephemeral=True)
+                return
+            postid = match.group(1)
+
+            conn = sqlite3.connect("DailyGamesPosts.db")
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM posts WHERE id = ?", (postid,))
+            post_exists = cursor.fetchone()
+            cursor.execute("SELECT name FROM series WHERE LOWER(name) = LOWER(?)", (series_name,))
+            series_row = cursor.fetchone()
+            series_exists = series_row is not None
+            if series_row:
+                series_name = series_row[0]
+            if post_exists and series_exists:
+                cursor.execute("UPDATE posts SET seriesname = ? WHERE id = ?",(series_name, postid))
+                conn.commit()
+                await interaction.response.send_message(f"Post '{postid}' assigned to series '{series_name}'.", ephemeral=True)
+
+                cursor.execute("SELECT userid FROM subscriptions WHERE LOWER(seriesname) = LOWER(?) AND platform = 'discord'", (series_name,))
+                user_ids = [int(row[0]) for row in cursor.fetchall()]
+                if (len(user_ids) > 0):
+                    for guild in client.guilds:
+                        if guild.name == GUILD:
+                            for channel in guild.channels:
+                                if channel.name == CHANNEL:
+                                    # Find the original bot message about this post
+                                    async for msg in channel.history(limit=50):
+                                        if postid in msg.content and msg.author == client.user:
+                                            # Get users subscribed to this series
+                                            tags = []
+                                            for member in guild.members:
+                                                if member.id in user_ids:
+                                                    tags.append(member.mention)
+                                            reply = f"I first did not (correctly) recognize the series of this post, but I do recognize it now.\nIt is part of the series named {series_name}."
+                                            if len(tags) > 0:
+                                                reply += f"\nCircadians subscribed to this series: " + " ".join(tags)
+                                            await msg.reply(reply)
+                                            break
+            else:
+                if not post_exists:
+                    await interaction.response.send_message(f"Post with ID '{postid}' not found in the database.", ephemeral=True)
+                if not series_exists:
+                    await interaction.response.send_message(f"Series '{series_name}' not found.", ephemeral=True)
+            conn.commit()
+            conn.close()
+
 
 async def doLinkCheck(client):
     print("New post check")
@@ -190,112 +311,6 @@ async def process_txt_files(client):
             print(f"Error processing bot_domain_message file: {e}")
         await asyncio.sleep(10)
 
-async def perform_bot_action_from_distance(client):
-    await client.wait_until_ready()
-    while not client.is_closed():
-        try:
-            filename = 'bot_action.txt'
-            if os.path.isfile(filename):
-                with open(filename, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                print(f"About to perform bot action:\n{content}")
-                if content.startswith('addSeries(') and content.endswith(')'):
-                    series_name = content[len('addSeries("'):-2]
-                    conn = sqlite3.connect("DailyGamesPosts.db")
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT name FROM series WHERE LOWER(name) = LOWER(?)", (series_name,))
-                    existing = cursor.fetchone()
-                    if existing:
-                        print(f"Series '{series_name}' already exists as '{existing[0]}'.")
-                    else:
-                        cursor.execute("INSERT INTO series (name) VALUES (?)", (series_name,))
-                        conn.commit()
-                    conn.close()
-                    for guild in client.guilds:
-                        if guild.name == GUILD:
-                            for channel in guild.channels:
-                                if channel.name == CHANNEL:
-                                    await channel.send(f"It is now possible to subscribe to the series named {series_name}!")
-                    print(f"Series '{series_name}' added to database.")
-                elif content.startswith('addPostToSeries(') and content.endswith(')'):
-                    args = content[len('addPostToSeries("'):-2]
-                    postid, series_name = args.split('","')
-                    conn = sqlite3.connect("DailyGamesPosts.db")
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT 1 FROM posts WHERE id = ?", (postid,))
-                    post_exists = cursor.fetchone()
-                    cursor.execute("SELECT name FROM series WHERE LOWER(name) = LOWER(?)", (series_name,))
-                    series_row = cursor.fetchone()
-                    series_exists = series_row is not None
-                    if series_row:
-                        series_name = series_row[0]
-                    if post_exists and series_exists:
-                        cursor.execute("UPDATE posts SET seriesname = ? WHERE id = ?",(series_name, postid))
-                        conn.commit()
-                        print(f"Post '{postid}' assigned to series '{series_name}'.")
-
-                        cursor.execute("SELECT userid FROM subscriptions WHERE LOWER(seriesname) = LOWER(?) AND platform = 'discord'", (series_name,))
-                        user_ids = [int(row[0]) for row in cursor.fetchall()]
-                        if (len(user_ids) > 0):
-                            for guild in client.guilds:
-                                if guild.name == GUILD:
-                                    for channel in guild.channels:
-                                        if channel.name == CHANNEL:
-                                            # Find the original bot message about this post
-                                            async for msg in channel.history(limit=50):
-                                                if postid in msg.content and msg.author == client.user:
-                                                    # Get users subscribed to this series
-                                                    tags = []
-                                                    for member in guild.members:
-                                                        if member.id in user_ids:
-                                                            tags.append(member.mention)
-                                                    reply = f"I first did not (correctly) recognize the series of this post, but I do recognize it now.\nIt is part of the series named {series_name}."
-                                                    if len(tags) > 0:
-                                                        reply += f"\nCircadians subscribed to this series: " + " ".join(tags)
-                                                    await msg.reply(reply)
-                                                    break
-
-                    else:
-                        print("Post or Series not recognized!")
-                    conn.commit()
-                    conn.close()
-                elif content.startswith('renameSeries(') and content.endswith(')'):
-                    args = content[len('renameSeries("'):-2]
-                    old_name, new_name = args.split('","')
-                    conn = sqlite3.connect("DailyGamesPosts.db")
-                    cursor = conn.cursor()
-                    cursor.execute("SELECT name FROM series WHERE LOWER(name) = LOWER(?)", (old_name,))
-                    old_row = cursor.fetchone()
-                    old_exists = old_row is not None
-                    if old_row:
-                        old_name = old_row[0]
-                    if not old_exists:
-                        print(f"Series '{old_name}' not found.")
-                    else:
-                        cursor.execute("SELECT name FROM series WHERE LOWER(name) = LOWER(?)", (new_name,))
-                        new_row = cursor.fetchone()
-                        new_exists = new_row is not None
-                        if new_exists and (new_row[0].lower() != old_name.lower()):
-                            print(f"Series '{new_name}' already exists.")
-                        else:
-                            cursor.execute("UPDATE series SET name = ? WHERE LOWER(name) = LOWER(?)", (new_name, old_name))
-                            cursor.execute("UPDATE subscriptions SET seriesname = ? WHERE LOWER(seriesname) = LOWER(?)", (new_name, old_name))
-                            cursor.execute("UPDATE posts SET seriesname = ? WHERE LOWER(seriesname) = LOWER(?)", (new_name, old_name))
-                            conn.commit()
-                            print(f"Series '{old_name}' renamed to '{new_name}'.")
-                            for guild in client.guilds:
-                                if guild.name == GUILD:
-                                    for channel in guild.channels:
-                                        if channel.name == CHANNEL:
-                                            await channel.send(f"The series '{old_name}' has been renamed to '{new_name}'.")
-                    conn.close()
-                else:
-                    print("Action not recognized")
-                os.remove(filename)
-        except Exception as e:
-            print(f"Error processing bot_domain_message file: {e}")
-        await asyncio.sleep(10)
-
 intents = discord.Intents.default()
 intents.members = True
 client = MyClient(intents=intents)
@@ -307,13 +322,17 @@ async def on_ready():
     for guild in client.guilds:
         print(f"- {guild.name} (ID: {guild.id})")
     
+#    guild = discord.Object(id=1292147569908125816) # DailyGames server
+#    client.tree.copy_global_to(guild=guild)
+#    await client.tree.sync(guild=guild)
+
     await client.tree.sync()
     print("Slash commands synced globally.")
-    commands = await client.tree.fetch_commands()
 
     print("Registered slash commands:")
+    commands = await client.tree.fetch_commands()
     for cmd in commands:
         print(f"- /{cmd.name}: {cmd.description}")
-    print("These were are of the registered slash commands.")
+    print("These were all of the registered slash commands.")
 
 client.run(TOKEN)
