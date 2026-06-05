@@ -133,7 +133,7 @@ class MyClient(discord.Client):
 
         @self.tree.command(name="addseries", description="Add a new DailyGame to subscribe to")
         @discord.app_commands.describe(text="The name of the new series")
-        @discord.app_commands.checks.has_role('Botbouwer')
+        @discord.app_commands.checks.has_role('Human Overlord')
         async def addSeries(interaction: discord.Interaction, text: str):
             conn = sqlite3.connect("DailyGamesPosts.db")
             cursor = conn.cursor()
@@ -156,7 +156,7 @@ class MyClient(discord.Client):
         @self.tree.command(name="renameseries", description="Rename a DailyGame")
         @discord.app_commands.describe(old_name="The current name of the series", new_name="The new name for the series")
         @discord.app_commands.autocomplete(old_name=autocomplete_all_series)
-        @discord.app_commands.checks.has_role('Botbouwer')
+        @discord.app_commands.checks.has_role('Human Overlord')
         async def renameSeries(interaction: discord.Interaction, old_name: str, new_name: str):
             conn = sqlite3.connect("DailyGamesPosts.db")
             cursor = conn.cursor()
@@ -187,10 +187,10 @@ class MyClient(discord.Client):
             send_email("Series renamed!",f"The series '{old_name}' has been renamed to '{new_name}' by {interaction.user.name}.")
             conn.close()
 
-        @self.tree.command(name="addposttoseries", description="Add a post to a series")
+        @self.tree.command(name="addposttoseries", description="Add a post to a series if it was not correctly recognized")
         @discord.app_commands.describe(series_name="The name of the series to add the post to")
         @discord.app_commands.autocomplete(series_name=autocomplete_all_series)
-        @discord.app_commands.checks.has_role('Botbouwer')
+        @discord.app_commands.checks.has_role('Human Overlord')
         async def addposttoseries(interaction: discord.Interaction, series_name: str, reddit_link: str):
             match = re.search(r'comments/([a-z0-9]+)/', reddit_link)
             if not match:
@@ -325,6 +325,7 @@ async def on_ready():
 #    guild = discord.Object(id=1292147569908125816) # DailyGames server
 #    client.tree.copy_global_to(guild=guild)
 #    await client.tree.sync(guild=guild)
+#    print("Slash commands synced locally.")
 
     await client.tree.sync()
     print("Slash commands synced globally.")
