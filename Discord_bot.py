@@ -247,6 +247,31 @@ class MyClient(discord.Client):
             conn.commit()
             conn.close()
 
+        @self.tree.command(name="removebotmessage", description="Remove a message of the bot")
+        @discord.app_commands.describe(message_link="The link to the message to remove")
+        @discord.app_commands.checks.has_role('Botbouwer')
+        async def removebotmessage(interaction: discord.Interaction, message_link: str):
+            match = re.search(r'/channels/\d+/(\d+)/(\d+)', message_link)
+            if not match:
+                await interaction.response.send_message("Invalid message link format. Please provide a link to a Discord message.", ephemeral=True)
+                return
+            channel_id = int(match.group(1))
+            message_id = int(match.group(2))
+
+            channel = client.get_channel(channel_id)
+            if not channel:
+                await interaction.response.send_message("Channel not found.", ephemeral=True)
+                return
+
+            try:
+                message = await channel.fetch_message(message_id)
+                if message.author != client.user:
+                    await interaction.response.send_message("I can only delete my own messages.", ephemeral=True)
+                    return
+                await message.delete()
+                await interaction.response.send_message("Message deleted successfully.", ephemeral=True)
+            except Exception as e:
+                await interaction.response.send_message(f"Error deleting message: {e}", ephemeral=True)
 
 async def doLinkCheck(client):
     print("New post check")
