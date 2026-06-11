@@ -327,48 +327,37 @@ async def activate_rugby_report(client):
             if os.path.isfile(filename):
                 with open(filename, 'r', encoding='utf-8') as f:
                     TEXT = f.read()
-                
+            
                 print("Processing rugby report")
-                start_time = TEXT.splitlines()[0].strip()
-                TEXT = "\n".join(TEXT.splitlines()[1:])
-
-                base_time_utc = datetime.now(UTC_TZ)
-                base_time_local = base_time_utc.astimezone(AMSTERDAM_TZ)
-                first_game_time = datetime.strptime(start_time, "%H:%M").replace(year=base_time_local.year,month=base_time_local.month,day=base_time_local.day,tzinfo=AMSTERDAM_TZ,)
-                first_game_time_utc = first_game_time.astimezone(UTC_TZ)
-
-                FIRST_GAME_DELAY = first_game_time_utc - base_time_utc
-                GAME_INTERVAL = timedelta(hours=3, minutes=30)
-                HALFTIME_DURATION = timedelta(minutes=15)
-
                 conn = sqlite3.connect("DailyGamesPosts.db")
                 cur = conn.cursor()
+
+                print("Clearing all existing rugby messages from the queue.")
                 cur.execute('''CREATE TABLE IF NOT EXISTS rugby_messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     scheduled_time DATETIME NOT NULL,
                     message TEXT NOT NULL)''')
                 cur.execute("DELETE FROM rugby_messages")
                 conn.commit()
-                print("Cleared all existing rugby messages from the queue.")
 
-                game_schedule = "The following rugby matches will be played:\n\n" 
+                schedule_list = [(datetime.now(UTC_TZ),'','')]
 
                 games = re.split(r"\n\s*\n(?=Game \d+)", TEXT.strip())
                 for game_number, game_text in enumerate(games):
+                    start_time = lines[1]
+                    game_start = datetime.strptime(start_time, "%d-%m-%Y %H:%M").replace(tzinfo=AMSTERDAM_TZ).astimezone(UTC_TZ)
+
                     lines = [line.strip() for line in game_text.splitlines() if line.strip()]
-                    matchup = lines[1]
+                    matchup = lines[2]
                     m = re.match(r"(.+) will be playing against (.+)!", matchup)
                     team_a = m.group(1)
                     team_b = m.group(2)
 
-                    game_start = (base_time_utc + FIRST_GAME_DELAY + game_number * GAME_INTERVAL)
-
-                    game_schedule += f"{team_a} vs {team_b} at <t:{int(game_start.timestamp())}:t>\n"
-
                     scheduled = []
+
                     # Reminders
-                    scheduled.append((game_start - timedelta(hours=2), f"Reminder: {team_a} vs {team_b} starts in 2 hours!"))
-                    scheduled.append((game_start - timedelta(hours=1), f"Reminder: {team_a} vs {team_b} starts in 1 hour!"))
+                    scheduled.append((game_start - timedelta(hours=1, minutes=30), f"Reminder: {team_a} vs {team_b} starts in 1 hour and 30 minutes!"))
+                    scheduled.append((game_start - timedelta(minutes=45), f"Reminder: {team_a} vs {team_b} starts in 45 minutes!"))
                     scheduled.append((game_start - timedelta(minutes=10), f"Reminder: {team_a} vs {team_b} starts in 10 minutes!"))
 
                     # Kickoff
@@ -377,7 +366,7 @@ async def activate_rugby_report(client):
                     halftime_minute = None
                     final_score_line = None
                     latest_event_time = game_start
-                    for line in lines[2:]:
+                    for line in lines[3:]:
                         if line.startswith("Final score"):
                             final_score_line = line
                             continue
@@ -390,7 +379,7 @@ async def activate_rugby_report(client):
                             halftime_time = (game_start + timedelta(minutes=minute))
                             scheduled.append((halftime_time, line))
                             scheduled.append((halftime_time, "Second half starts in 15 minutes."))
-                            resume_time = halftime_time + HALFTIME_DURATION
+                            resume_time = halftime_time + timedelta(minutes=15)
                             scheduled.append((resume_time, "The second half begins!"))
                             latest_event_time = max(latest_event_time, resume_time)
                             continue
@@ -398,22 +387,26 @@ async def activate_rugby_report(client):
                         actual_time = (game_start + timedelta(minutes=minute))
 
                         if halftime_minute is not None and minute > halftime_minute:
-                            actual_time += HALFTIME_DURATION
+                            actual_time += timedelta(minutes=15)  # Account for halftime break
 
                         scheduled.append((actual_time, line))
                         latest_event_time = max(latest_event_time,actual_time)
 
                     # Final score 1 minute after last event
                     if final_score_line:
-                        scheduled.append((latest_event_time + timedelta(minutes=1), final_score_line))
-
-
+                        scheduled.append((game_start + timedelta(minutes=96), final_score_line))
+                        schedule_list.append((game_start + timedelta(minutes=97),final_score_line + "\n", f"{team_a} vs {team_b} at <t:{int(game_start.timestamp())}:f>\n"))
 
                     # Insert into database
                     for scheduled_time, message in scheduled:
                         cur.execute("INSERT INTO rugby_messages (scheduled_time, message) VALUES (?, ?)", (scheduled_time.isoformat(), message))
 
-                cur.execute("INSERT INTO rugby_messages (scheduled_time, message) VALUES (?, ?)", (base_time_utc, game_schedule))
+                for i in range(len(schedule_list)):
+                    game_schedule = "These are the matches of this round:\n\n"
+                    game_schedule += "".join(schedule_list[j][1] for j in range(i+1))
+                    game_schedule += "".join(schedule_list[j][2] for j in range(i+1, len(schedule_list)))
+                    cur.execute("INSERT INTO rugby_messages (scheduled_time, message) VALUES (?, ?)", (schedule_list[i][0].isoformat(), game_schedule))
+
                 conn.commit()
                 conn.close()
 
