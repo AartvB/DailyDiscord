@@ -44,6 +44,29 @@ def send_email(subject, body):
         print(f"Error sending email: {e}")
 
 # Autocomplete helpers
+async def autocomplete_subscribe_rugby_matches(interaction: discord.Interaction, current: str):
+    user_id = interaction.user.id
+    conn = sqlite3.connect("DailyGamesPosts.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT matchname FROM rugbymatches WHERE LOWER(matchname) LIKE ?", (f"{current.lower()}%",))
+    results = [row[0] for row in cursor.fetchall()]
+    cursor.execute("SELECT matchname FROM rugbymatchsubscriptions WHERE userid = ? AND LOWER(matchname) LIKE ?", (user_id, f"{current.lower()}%"))
+    subscriptions = [row[0] for row in cursor.fetchall()]
+    results = [name for name in results if name not in subscriptions]
+    results.sort(key=str.casefold)
+    conn.close()
+    return [discord.app_commands.Choice(name=name, value=name) for name in results]
+
+async def autocomplete_unsubscribe_rugby_matches(interaction: discord.Interaction, current: str):
+    user_id = interaction.user.id
+    conn = sqlite3.connect("DailyGamesPosts.db")
+    cursor = conn.cursor()
+    cursor.execute("SELECT matchname FROM rugbymatchsubscriptions WHERE userid = ? AND LOWER(matchname) LIKE ?", (user_id, f"{current.lower()}%"))
+    results = [row[0] for row in cursor.fetchall()]
+    results.sort(key=str.casefold)
+    conn.close()
+    return [discord.app_commands.Choice(name=name, value=name) for name in results]
+
 async def autocomplete_subscribe(interaction: discord.Interaction, current: str):
     user_id = interaction.user.id
     conn = sqlite3.connect("DailyGamesPosts.db")
@@ -137,6 +160,44 @@ class MyClient(discord.Client):
                 await interaction.response.send_message(f"You are subscribed to: {', '.join(subscriptions)}", ephemeral=True)
             else:
                 await interaction.response.send_message("You are not subscribed to any series.", ephemeral=True)
+
+        @self.tree.command(name="rugbysubscribe", description="Subscribe to a rugby match")
+        @discord.app_commands.describe(text="The match to subscribe to")
+        @discord.app_commands.autocomplete(text=autocomplete_subscribe_rugby_matches)
+        async def subscribe(interaction: discord.Interaction, text: str):
+            conn = sqlite3.connect("DailyGamesPosts.db")
+            cursor = conn.cursor()
+            cursor.execute("SELECT matchname FROM rugbymatches")
+            match_rows = [row[0] for row in cursor.fetchall()]
+            match_map = {name.lower(): name for name in match_rows}
+            if text.lower() not in match_map:
+                await interaction.response.send_message(f"Match '{text}' not found. Available matches: {', '.join(match_rows)}", ephemeral=True)
+                conn.close()
+                return
+            actual_name = match_map[text.lower()]
+            cursor.execute("INSERT OR IGNORE INTO rugbymatchsubscriptions (userid, matchname) VALUES (?, ?)", (interaction.user.id, actual_name))
+            conn.commit()
+            conn.close()
+            await interaction.response.send_message(f"You have subscribed to '{text}'.", ephemeral=True)
+
+        @self.tree.command(name="rugbyunsubscribe", description="Unsubscribe from a rugby match")
+        @discord.app_commands.describe(text="The match to unsubscribe from")
+        @discord.app_commands.autocomplete(text=autocomplete_unsubscribe_rugby_matches)
+        async def unsubscribe(interaction: discord.Interaction, text: str):
+            user_id = interaction.user.id
+            conn = sqlite3.connect("DailyGamesPosts.db")
+            cursor = conn.cursor()
+            cursor.execute("SELECT matchname FROM rugbymatchsubscriptions WHERE userid = ?", (user_id,))
+            subs = [row[0] for row in cursor.fetchall()]
+            matching = next((s for s in subs if s.lower() == text.lower()), None)
+            if not matching:
+                await interaction.response.send_message(f"You are not subscribed to '{text}'.", ephemeral=True)
+                conn.close()
+            else:
+                cursor.execute("DELETE FROM rugbymatchsubscriptions WHERE userid = ? AND LOWER(matchname) = LOWER(?)", (user_id, text))
+                conn.commit()
+                conn.close()
+                await interaction.response.send_message(f"You have unsubscribed from '{text}'.", ephemeral=True)
 
         @self.tree.command(name="addseries", description="Add a new DailyGame to subscribe to")
         @discord.app_commands.describe(text="The name of the new series")
@@ -389,6 +450,7 @@ async def activate_rugby_report(client):
 
                     # Kickoff
                     scheduled.append((game_start, f"The game between {team_a} and {team_b} begins!"))
+                    cur.execute("INSERT INTO rugbymatches (matchname) VALUES (?)", (f"{team_a} vs {team_b}",))
 
                     halftime_minute = None
                     final_score_line = None
@@ -463,6 +525,27 @@ async def send_rugby_message(client):
                 print(f"Sending scheduled rugby message: {message}")
                 thread_id = 1512140552676577351
                 thread = client.get_channel(thread_id)
+
+                is_reminder = re.match(r"Reminder: (.+) vs (.+) starts in (.+)!", message)
+                is_game_start = re.match(r"The game between (.+) and (.+) begins!", message)
+                if is_reminder or is_game_start:
+                    team_a, team_b = re.match(r".*?(.+) vs (.+?)( starts in .+| begins)?!", message).groups()[:2]
+                    cur.execute("SELECT userid FROM rugbymatchsubscriptions WHERE LOWER(matchname) = LOWER(?)", (f"{team_a} vs {team_b}",))
+                    user_ids = [int(row[0]) for row in cur.fetchall()]
+
+                    if is_game_start:
+                        cur.execute("DELETE FROM rugbymatchsubscriptions WHERE LOWER(matchname) = LOWER(?)", (f"{team_a} vs {team_b}",))
+                        cur.execute("DELETE FROM rugbymatches WHERE LOWER(matchname) = LOWER(?)", (f"{team_a} vs {team_b}",))
+
+                    for guild in client.guilds:
+                        if guild.name == GUILD:
+                            tags = []
+                            for member in guild.members:
+                                if member.id in user_ids:
+                                    tags.append(member.mention)
+                            if len(tags) > 0:
+                                message += f"\nCircadians subscribed to this match: " + " ".join(tags)
+
                 await thread.send(message)
                 cur.execute("DELETE FROM rugby_messages WHERE id = ?", (message_id,))
                 conn.commit()
@@ -480,6 +563,8 @@ async def on_ready():
     print(f'Logged in as {client.user} (ID: {client.user.id})')
     print('Guilds the bot is in:')
     for guild in client.guilds:
+        client.tree.clear_commands(guild=guild)  # Clear global commands
+        await client.tree.sync(guild=guild)  # Sync to clear guild-specific commands
         print(f"- {guild.name} (ID: {guild.id})")
     
 #    guild = discord.Object(id=1292147569908125816) # DailyGames server
