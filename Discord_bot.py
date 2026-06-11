@@ -365,14 +365,16 @@ async def activate_rugby_report(client):
                 cur.execute("DELETE FROM rugby_messages")
                 conn.commit()
 
-                schedule_list = [(datetime.now(UTC_TZ),'','')]
+                schedule_list = [(datetime.now(UTC_TZ),'','')] if re.match(r"Send initial schedule message: (.+)", TEXT.splitlines()[0])[1].lower() == "true" else []
+                TEXT = "\n".join(TEXT.splitlines()[1:])
 
                 games = re.split(r"\n\s*\n(?=Game \d+)", TEXT.strip())
                 for game_number, game_text in enumerate(games):
+                    lines = [line.strip() for line in game_text.splitlines() if line.strip()]
+
                     start_time = lines[1]
                     game_start = datetime.strptime(start_time, "%d-%m-%Y %H:%M").replace(tzinfo=AMSTERDAM_TZ).astimezone(UTC_TZ)
 
-                    lines = [line.strip() for line in game_text.splitlines() if line.strip()]
                     matchup = lines[2]
                     m = re.match(r"(.+) will be playing against (.+)!", matchup)
                     team_a = m.group(1)
