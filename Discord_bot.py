@@ -399,6 +399,8 @@ async def activate_rugby_report(client):
                             continue
                         minute_match = re.match(r"(\d+)'", line)
                         if not minute_match:
+                            if len(line) > 0:
+                                scheduled.append((latest_event_time + timedelta(seconds=20), line))
                             continue
                         minute = int(minute_match.group(1))
                         if "Half-time" in line:
@@ -422,7 +424,7 @@ async def activate_rugby_report(client):
                     # Final score 1 minute after last event
                     if final_score_line:
                         scheduled.append((game_start + timedelta(minutes=96), final_score_line))
-                        schedule_list.append((game_start + timedelta(minutes=97),final_score_line + "\n", f"{team_a} vs {team_b} at <t:{int(game_start.timestamp())}:f>\n"))
+                        schedule_list.append((game_start + timedelta(minutes=96, seconds=20),final_score_line + "\n", f"{team_a} vs {team_b} at <t:{int(game_start.timestamp())}:f>\n"))
 
                     # Insert into database
                     for scheduled_time, message in scheduled:
