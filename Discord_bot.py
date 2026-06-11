@@ -1,5 +1,5 @@
-from email.mime import text
 import os
+from xmlrpc import client
 import discord
 import asyncio
 from dotenv import load_dotenv
@@ -12,6 +12,8 @@ from email.mime.multipart import MIMEMultipart
 import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
+import requests
+from icalendar import Calendar
 
 AMSTERDAM_TZ = ZoneInfo("Europe/Amsterdam")
 UTC_TZ = ZoneInfo("UTC")
@@ -19,7 +21,11 @@ UTC_TZ = ZoneInfo("UTC")
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 GUILD = os.getenv('DISCORD_GUILD')
-CHANNEL = os.getenv('DISCORD_CHANNEL')
+NEW_POST_CHANNEL = os.getenv('NEW_POST_CHANNEL')
+DAILY_RUGBY_CHANNEL_ID = os.getenv('DAILY_RUGBY_CHANNEL_ID')
+DAILY_DATE_CHANNEL_ID = os.getenv('DAILY_DATE_CHANNEL_ID')
+TEST_CHANNEL_ID = os.getenv('TEST_CHANNEL_ID')
+ICAL_URL = os.getenv('ICAL_URL')
 email_account = os.getenv('ACCOUNT')
 email_app_password = os.getenv('PASSWORD')
 email_receiver = os.getenv('RECEIVER')
@@ -107,6 +113,7 @@ class MyClient(discord.Client):
         self.txt_task = self.loop.create_task(process_txt_files(self))
         self.rugby_task = self.loop.create_task(activate_rugby_report(self))
         self.rugby_message_task = self.loop.create_task(send_rugby_message(self))
+        self.date_task = self.loop.create_task(send_daily_date_message(self))
 #        self.perform_bot_action_task = self.loop.create_task(perform_bot_action_from_distance(self))
         self.tree = discord.app_commands.CommandTree(self)
 
@@ -216,7 +223,7 @@ class MyClient(discord.Client):
                 for guild in client.guilds:
                     if guild.name == GUILD:
                         for channel in guild.channels:
-                            if channel.name == CHANNEL:
+                            if channel.name == NEW_POST_CHANNEL:
                                 await channel.send(f"It is now possible to subscribe to the series named {text}!")
             send_email("New series added!",f"The series '{text}' has been added to the database by {interaction.user.name}.")
             conn.close()
@@ -250,7 +257,7 @@ class MyClient(discord.Client):
                     for guild in client.guilds:
                         if guild.name == GUILD:
                             for channel in guild.channels:
-                                if channel.name == CHANNEL:
+                                if channel.name == NEW_POST_CHANNEL:
                                     await channel.send(f"The series '{old_name}' has been renamed to '{new_name}'.")
             send_email("Series renamed!",f"The series '{old_name}' has been renamed to '{new_name}' by {interaction.user.name}.")
             conn.close()
@@ -286,7 +293,7 @@ class MyClient(discord.Client):
                     for guild in client.guilds:
                         if guild.name == GUILD:
                             for channel in guild.channels:
-                                if channel.name == CHANNEL:
+                                if channel.name == NEW_POST_CHANNEL:
                                     # Find the original bot message about this post
                                     async for msg in channel.history(limit=50):
                                         if postid in msg.content and msg.author == client.user:
@@ -319,7 +326,7 @@ class MyClient(discord.Client):
             channel_id = int(match.group(1))
             message_id = int(match.group(2))
 
-            channel = client.get_channel(channel_id)
+            channel = await client.fetch_channel(channel_id)
             if not channel:
                 await interaction.response.send_message("Channel not found.", ephemeral=True)
                 return
@@ -371,7 +378,7 @@ async def doLinkCheck(client):
             for guild in client.guilds:
                 if guild.name == GUILD:
                     for channel in guild.channels:
-                        if channel.name == CHANNEL:
+                        if channel.name == NEW_POST_CHANNEL:
                             await channel.send(message)
     conn.close()
 
@@ -523,8 +530,7 @@ async def send_rugby_message(client):
             messages = cur.fetchall()
             for message_id, message in messages:
                 print(f"Sending scheduled rugby message: {message}")
-                thread_id = 1512140552676577351
-                thread = client.get_channel(thread_id)
+                thread = await client.fetch_channel(DAILY_RUGBY_CHANNEL_ID)
 
                 is_reminder = re.match(r"Reminder: (.+) vs (.+) starts in (.+)!", message)
                 is_game_start = re.match(r"The game between (.+) and (.+) begins!", message)
@@ -553,6 +559,40 @@ async def send_rugby_message(client):
         except Exception as e:
             print(f"Error sending rugby messages: {e}")
         await asyncio.sleep(10)
+
+async def send_daily_date_message(client):
+    await client.wait_until_ready()
+    while not client.is_closed():
+        try:
+            today = datetime.now(UTC_TZ).strftime('%d %B')
+            conn = sqlite3.connect("DailyGamesPosts.db")
+            cursor = conn.cursor()
+            cursor.execute("SELECT date FROM latest_daily_message")
+            last_date = cursor.fetchone()[0]
+
+            if today != last_date:
+                response = requests.get(ICAL_URL)
+                cal = Calendar.from_ical(response.content)
+
+                print(f"Looking for calendar events on {today}")
+                for component in cal.walk():
+                    if component.name == "VEVENT":
+                        if component.get('dtstart').dt.strftime('%d %B') == today:
+                            title = component.get('summary')
+                            description = component.get('description')
+
+                            message = f"Today ({today}) is called {title}.\n\nThis day was named by {description.split('Named by ')[1].strip().split()[0]}"
+
+                            thread = await client.fetch_channel(DAILY_DATE_CHANNEL_ID)
+                            await thread.send(message)   
+                            cursor.execute("UPDATE latest_daily_message SET date = ?", (today,))             
+                            conn.commit()
+                            break
+            conn.close()
+
+        except Exception as e:
+            print(f"Error sending daily date message: {e}")
+        await asyncio.sleep(2)
 
 intents = discord.Intents.default()
 intents.members = True
