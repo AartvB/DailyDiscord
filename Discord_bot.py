@@ -132,6 +132,26 @@ async def autocomplete_all_series(interaction: discord.Interaction, current: str
             print(f"Error in autocomplete_all_series: {e}")
         await asyncio.sleep(2)
 
+async def autocomplete_rugby_team(interaction: discord.Interaction, current: str):
+    
+    while True:
+        try:
+            conn = sqlite3.connect("rugby.db")
+            cursor = conn.cursor()
+            cursor.execute("SELECT country, username FROM teams WHERE LOWER(country) LIKE ?", (f"{current.lower()}%",))
+            results = cursor.fetchall()
+            cursor.execute("SELECT teamA FROM planned_matches")
+            teamA_results = [row[0] for row in cursor.fetchall()]
+            cursor.execute("SELECT teamB FROM planned_matches")
+            teamB_results = [row[0] for row in cursor.fetchall()]
+            results = list(set([result[0] for result in results if result[1] in teamA_results or result[1] in teamB_results]))
+            results.sort(key=str.casefold)
+            conn.close()
+            return [discord.app_commands.Choice(name=name, value=name) for name in results]
+        except Exception as e:
+            print(f"Error in autocomplete_rugby_team: {e}")
+        await asyncio.sleep(2)
+
 class MyClient(discord.Client):
     async def setup_hook(self):
         self.reddit = asyncpraw.Reddit('bot1')
@@ -262,6 +282,21 @@ class MyClient(discord.Client):
                 except Exception as e:
                     print(f"Error in unsubscribe: {e}")
                 await asyncio.sleep(2)
+
+        @self.tree.command(name="getrugbyodds", description="Get the odds for a rugby team to score within a certain range")
+        @discord.app_commands.describe(team="The team to get odds for")
+        @discord.app_commands.describe(min_points="The minimum points to consider")
+        @discord.app_commands.describe(max_points="The maximum points to consider")
+        @discord.app_commands.autocomplete(team=autocomplete_rugby_team)
+        async def getrugbyodds(interaction: discord.Interaction, team: str, min_points: int, max_points: int):
+            from rugby_class import RugbyOddsCalculator
+            roc = RugbyOddsCalculator()
+            try:
+                result = roc.get_score_odds(team, min_points, max_points)
+                await interaction.response.send_message(f"The odds for {team} to score at least {min_points} and no more than {max_points} points against {result[0]} are: {result[1]}", ephemeral=True)
+            except Exception as e:
+                print(f"Error in getrugbyodds: {e}")
+                await interaction.response.send_message(f"An error occurred while fetching the odds: {e}.", ephemeral=True)
 
         @self.tree.command(name="addseries", description="Add a new DailyGame to subscribe to")
         @discord.app_commands.describe(text="The name of the new series")
