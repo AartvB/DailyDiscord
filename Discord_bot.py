@@ -548,8 +548,11 @@ async def activate_rugby_report(client):
                 cur.execute("DELETE FROM rugby_messages")
                 conn.commit()
 
-                schedule_list = [(datetime.now(UTC_TZ),'','')] if re.match(r"Send initial schedule message: (.+)", TEXT.splitlines()[0])[1].lower() == "true" else []
-                TEXT = "\n".join(TEXT.splitlines()[1:])
+                now = datetime.now(UTC_TZ)
+                schedule_list = [(now,'','')] if re.match(r"Send initial schedule message: (.+)", TEXT.splitlines()[0])[1].lower() == "true" else []
+
+                include_messages_from_past = re.match(r"Include messages from past: (.+)", TEXT.splitlines()[1])[1].lower() == "true"
+                TEXT = "\n".join(TEXT.splitlines()[2:])
 
                 games = re.split(r"\n\s*\n(?=Game \d+)", TEXT.strip())
                 for game_number, game_text in enumerate(games):
@@ -580,6 +583,7 @@ async def activate_rugby_report(client):
                     for line in lines[3:]:
                         if line.startswith("Final score"):
                             final_score_line = line
+                            latest_event_time = max(latest_event_time, game_start + timedelta(minutes=96))
                             continue
                         minute_match = re.match(r"(\d+)'", line)
                         if not minute_match:
@@ -612,13 +616,15 @@ async def activate_rugby_report(client):
 
                     # Insert into database
                     for scheduled_time, message in scheduled:
-                        cur.execute("INSERT INTO rugby_messages (scheduled_time, message) VALUES (?, ?)", (scheduled_time.isoformat(), message))
+                        if scheduled_time >= now or include_messages_from_past:
+                            cur.execute("INSERT INTO rugby_messages (scheduled_time, message) VALUES (?, ?)", (scheduled_time.isoformat(), message))
 
                 for i in range(len(schedule_list)):
-                    game_schedule = "These are the matches of this round:\n\n"
-                    game_schedule += "".join(schedule_list[j][1] for j in range(i+1))
-                    game_schedule += "".join(schedule_list[j][2] for j in range(i+1, len(schedule_list)))
-                    cur.execute("INSERT INTO rugby_messages (scheduled_time, message) VALUES (?, ?)", (schedule_list[i][0].isoformat(), game_schedule))
+                    if schedule_list[i][0] >= now or include_messages_from_past:
+                        game_schedule = "These are the matches of this round:\n\n"
+                        game_schedule += "".join(schedule_list[j][1] for j in range(i+1))
+                        game_schedule += "".join(schedule_list[j][2] for j in range(i+1, len(schedule_list)))
+                        cur.execute("INSERT INTO rugby_messages (scheduled_time, message) VALUES (?, ?)", (schedule_list[i][0].isoformat(), game_schedule))
 
                 conn.commit()
                 conn.close()
