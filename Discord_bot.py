@@ -613,9 +613,9 @@ async def send_rugby_message(client):
                 print(f"Sending scheduled rugby message: {message}")
                 thread = await client.fetch_channel(DAILY_RUGBY_CHANNEL_ID)
 
-                is_reminder = re.match(r"Reminder: (.+) vs (.+) starts in (.+)!", message)
+                is_first_reminder = re.match(r"Reminder: (.+) vs (.+) starts in 1 hours and 30 minutes!", message)
                 is_game_start = re.match(r"The game between (.+) and (.+) begins!", message)
-                if is_reminder or is_game_start:
+                if is_first_reminder or is_game_start:
                     match_obj = re.match(r"Reminder: (.+?) vs (.+?) starts in .+!|The game between (.+?) and (.+?) begins!", message)
                     team_a = (match_obj.group(1) or match_obj.group(3)).strip()
                     team_b = (match_obj.group(2) or match_obj.group(4)).strip()
