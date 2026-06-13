@@ -421,6 +421,37 @@ class MyClient(discord.Client):
                 await interaction.response.send_message("Message deleted successfully.", ephemeral=True)
             except Exception as e:
                 await interaction.response.send_message(f"Error deleting message: {e}", ephemeral=True)
+        
+        @self.tree.command(name="detectad", description="Let me know when you found a reddit post containing an advertisement")
+        @discord.app_commands.describe(post_link="The link to the reddit post containing the advertisement")
+        async def detectad(interaction: discord.Interaction, post_link: str):
+            match = re.search(r'reddit\.com/r/dailygames/comments/([a-z0-9]+)/', post_link)
+            if not match:
+                await interaction.response.send_message("Invalid Reddit link format. Please provide a link to a DailyGames reddit post.", ephemeral=True)
+                return
+            postid = match.group(1)
+
+            try:
+                post = await self.reddit.submission(postid)
+                post_time = post.created_utc
+                with sqlite3.connect("DailyGamesPosts.db") as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT timestamp FROM latest_ad")
+                    latest_ad_timestamp = cursor.fetchone()[0]
+                    if post_time < latest_ad_timestamp:
+                        await interaction.response.send_message("This post is older than the latest advertisement I have recorded.", ephemeral=True)
+                        return
+                    if post_time == latest_ad_timestamp:
+                        await interaction.response.send_message("This post was already reported as an advertisement.", ephemeral=True)
+                        return
+                    cursor.execute("UPDATE latest_ad SET timestamp = ?", (post_time,))
+                delta = int(post_time - latest_ad_timestamp); days, rem = divmod(delta, 24 * 60 * 60); hours, rem = divmod(rem, 60 * 60); minutes, seconds = divmod(rem, 60)
+                thread = await self.fetch_channel(ADVERTISEMENT_CHANNEL_ID)
+                await thread.send(f"A new advertisement was posted on r/dailygames. It has been {int(days)} days, {int(hours)} hours, {int(minutes)} minutes, and {int(seconds)} seconds since the last one.")
+                await interaction.response.send_message(f"Thank you for reporting the advertisement. I have recorded it and notified the appropriate channel.", ephemeral=True)
+            except Exception as e:
+                print(f"Error in detectad: {e}")
+                await interaction.response.send_message(f"An error occurred while processing the advertisement: {e}.", ephemeral=True)
 
 async def doLinkCheck(client):
     print("New post check")
