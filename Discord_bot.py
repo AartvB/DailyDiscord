@@ -271,7 +271,7 @@ class MyClient(discord.Client):
         @discord.app_commands.describe(max_points="The maximum points to consider")
         @discord.app_commands.describe(private="Whether the result should be private")
         @discord.app_commands.autocomplete(team=autocomplete_rugby_team)
-        async def getrugbyodds(interaction: discord.Interaction, team: str, min_points: int, max_points: int, private: bool = False):
+        async def getrugbyodds(interaction: discord.Interaction, team: str, min_points: int, max_points: int, private: bool = True):
             from rugby_class import RugbyOddsCalculator
             roc = RugbyOddsCalculator()
             try:
