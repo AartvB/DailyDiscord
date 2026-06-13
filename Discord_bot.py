@@ -5,10 +5,7 @@ import asyncio
 from dotenv import load_dotenv
 import asyncpraw
 import sqlite3
-import smtplib
 import time
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -26,124 +23,49 @@ BOT_DOMAIN_CHANNEL_ID = os.getenv('BOT_DOMAIN_CHANNEL_ID')
 DAILY_RUGBY_CHANNEL_ID = os.getenv('DAILY_RUGBY_CHANNEL_ID')
 DAILY_DATE_CHANNEL_ID = os.getenv('DAILY_DATE_CHANNEL_ID')
 TEST_CHANNEL_ID = os.getenv('TEST_CHANNEL_ID')
+ADVERTISEMENT_CHANNEL_ID = os.getenv('ADVERTISEMENT_CHANNEL_ID')
 ICAL_URL = os.getenv('ICAL_URL')
-email_account = os.getenv('ACCOUNT')
-email_app_password = os.getenv('PASSWORD')
-email_receiver = os.getenv('RECEIVER')
-
-def send_email(subject, body):
-    # Create email message
-    msg = MIMEMultipart()
-    msg["From"] = email_account
-    msg["To"] = email_receiver
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain"))
-
-    # Connect to Gmail SMTP server and send email
-    try:
-        server = smtplib.SMTP("smtp.gmail.com", 587)
-        server.starttls()
-        server.login(email_account, email_app_password)
-        server.sendmail(email_account, email_receiver, msg.as_string())
-        server.quit()
-        print("Email sent successfully!")
-    except Exception as e:
-        print(f"Error sending email: {e}")
 
 # Autocomplete helpers
 async def autocomplete_subscribe_rugby_matches(interaction: discord.Interaction, current: str):
     user_id = interaction.user.id
-    try:
-        conn = sqlite3.connect("DailyGamesPosts.db")
+    with sqlite3.connect("DailyGamesPosts.db") as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT matchname FROM rugbymatches WHERE LOWER(matchname) LIKE ?", (f"{current.lower()}%",))
-        results = [row[0] for row in cursor.fetchall()]
-        cursor.execute("SELECT matchname FROM rugbymatchsubscriptions WHERE userid = ? AND LOWER(matchname) LIKE ?", (user_id, f"{current.lower()}%"))
-        subscriptions = [row[0] for row in cursor.fetchall()]
-        results = [name for name in results if name not in subscriptions]
-        results.sort(key=str.casefold)
-        conn.close()
-        return [discord.app_commands.Choice(name=name, value=name) for name in results]
-    except Exception as e:
-        print(f"Error in autocomplete_subscribe_rugby_matches: {e}")
-        return []
+        cursor.execute("SELECT matchname FROM rugbymatches WHERE LOWER(matchname) LIKE ? AND matchname NOT IN (SELECT matchname FROM rugbymatchsubscriptions WHERE userid = ?) ORDER BY matchname", (f"{current.lower()}%", user_id))
+        return [discord.app_commands.Choice(name=row[0], value=row[0]) for row in cursor.fetchall()]
 
 async def autocomplete_unsubscribe_rugby_matches(interaction: discord.Interaction, current: str):
     user_id = interaction.user.id
-    try:
-        conn = sqlite3.connect("DailyGamesPosts.db")
+    with sqlite3.connect("DailyGamesPosts.db") as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT matchname FROM rugbymatchsubscriptions WHERE userid = ? AND LOWER(matchname) LIKE ?", (user_id, f"{current.lower()}%"))
-        results = [row[0] for row in cursor.fetchall()]
-        results.sort(key=str.casefold)
-        conn.close()
-        return [discord.app_commands.Choice(name=name, value=name) for name in results]
-    except Exception as e:
-        print(f"Error in autocomplete_unsubscribe_rugby_matches: {e}")
-        return []
+        cursor.execute("SELECT matchname FROM rugbymatchsubscriptions WHERE userid = ? AND LOWER(matchname) LIKE ? ORDER BY matchname", (user_id, f"{current.lower()}%"))
+        return [discord.app_commands.Choice(name=row[0], value=row[0]) for row in cursor.fetchall()]
 
 async def autocomplete_subscribe(interaction: discord.Interaction, current: str):
-    try:
-        user_id = interaction.user.id
-        conn = sqlite3.connect("DailyGamesPosts.db")
+    user_id = interaction.user.id
+    with sqlite3.connect("DailyGamesPosts.db") as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT name FROM series WHERE LOWER(name) LIKE ?", (f"{current.lower()}%",))
-        results = [row[0] for row in cursor.fetchall()]
-        cursor.execute("SELECT seriesname FROM subscriptions WHERE userid = ? AND LOWER(seriesname) LIKE ? AND platform = 'discord'", (user_id, f"{current.lower()}%"))
-        subscriptions = [row[0] for row in cursor.fetchall()]
-        results = [name for name in results if name not in subscriptions]
-        results.sort(key=str.casefold)
-        conn.close()
-        return [discord.app_commands.Choice(name=name, value=name) for name in results[:25]]  # Max 25 choices
-    except Exception as e:
-        print(f"Error in autocomplete_subscribe: {e}")
-        return []
-    
+        cursor.execute("SELECT name FROM series WHERE LOWER(name) LIKE ? AND name NOT IN (SELECT seriesname FROM subscriptions WHERE userid = ? AND platform = 'discord') ORDER BY name LIMIT 25", (f"{current.lower()}%", user_id))
+        return [discord.app_commands.Choice(name=row[0], value=row[0]) for row in cursor.fetchall()]
 
 async def autocomplete_unsubscribe(interaction: discord.Interaction, current: str):
-    try:
-        user_id = interaction.user.id
-        conn = sqlite3.connect("DailyGamesPosts.db")
+    user_id = interaction.user.id
+    with sqlite3.connect("DailyGamesPosts.db") as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT seriesname FROM subscriptions WHERE userid = ? AND LOWER(seriesname) LIKE ? AND platform = 'discord'", (user_id, f"{current.lower()}%"))
-        results = [row[0] for row in cursor.fetchall()]
-        results.sort(key=str.casefold)
-        conn.close()
-        return [discord.app_commands.Choice(name=name, value=name) for name in results[:25]]  # Max 25 choices
-    except Exception as e:
-        print(f"Error in autocomplete_unsubscribe: {e}")
-        return []
+        cursor.execute("SELECT seriesname FROM subscriptions WHERE userid = ? AND LOWER(seriesname) LIKE ? AND platform = 'discord' ORDER BY seriesname LIMIT 25", (user_id, f"{current.lower()}%"))
+        return [discord.app_commands.Choice(name=row[0], value=row[0]) for row in cursor.fetchall()]
 
 async def autocomplete_all_series(interaction: discord.Interaction, current: str):
-    try:
-        conn = sqlite3.connect("DailyGamesPosts.db")
+    with sqlite3.connect("DailyGamesPosts.db") as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT name FROM series WHERE LOWER(name) LIKE ?", (f"{current.lower()}%",))
-        results = [row[0] for row in cursor.fetchall()]
-        results.sort(key=str.casefold)
-        conn.close()
-        return [discord.app_commands.Choice(name=name, value=name) for name in results[:25]]  # Max 25 choices
-    except Exception as e:
-        print(f"Error in autocomplete_all_series: {e}")
-        return []
+        cursor.execute("SELECT name FROM series WHERE LOWER(name) LIKE ? ORDER BY name LIMIT 25", (f"{current.lower()}%",))
+        return [discord.app_commands.Choice(name=row[0], value=row[0]) for row in cursor.fetchall()]
 
-async def autocomplete_rugby_team(interaction: discord.Interaction, current: str):    
-    try:
-        conn = sqlite3.connect("rugby.db")
+async def autocomplete_rugby_team(interaction: discord.Interaction, current: str):
+    with sqlite3.connect("rugby.db") as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT country, username FROM teams WHERE LOWER(country) LIKE ?", (f"{current.lower()}%",))
-        results = cursor.fetchall()
-        cursor.execute("SELECT teamA FROM planned_matches")
-        teamA_results = [row[0] for row in cursor.fetchall()]
-        cursor.execute("SELECT teamB FROM planned_matches")
-        teamB_results = [row[0] for row in cursor.fetchall()]
-        results = list(set([result[0] for result in results if result[1] in teamA_results or result[1] in teamB_results]))
-        results.sort(key=str.casefold)
-        conn.close()
-        return [discord.app_commands.Choice(name=name, value=name) for name in results]
-    except Exception as e:
-        print(f"Error in autocomplete_rugby_team: {e}")
-        return []
+        cursor.execute("SELECT country FROM teams WHERE LOWER(country) LIKE ? AND username IN (SELECT teamA FROM planned_matches UNION SELECT teamB FROM planned_matches) order by country", (f"{current.lower()}%",))
+        return [discord.app_commands.Choice(name=row[0], value=row[0]) for row in cursor.fetchall()]
 
 class MyClient(discord.Client):
     async def setup_hook(self):
@@ -299,7 +221,6 @@ class MyClient(discord.Client):
                     await interaction.response.send_message(f"Users can now subscribe to series '{text}'.", ephemeral=True)
                     thread = await client.fetch_channel(NEW_POST_CHANNEL_ID)
                     await thread.send(f"It is now possible to subscribe to the series named {text}!")
-                send_email("New series added!",f"The series '{text}' has been added to the database by {interaction.user.name}.")
                 conn.close()
             except Exception as e:
                 print(f"Error in addSeries: {e}")
@@ -334,7 +255,6 @@ class MyClient(discord.Client):
                         await interaction.response.send_message(f"You renamed Series '{old_name}' to '{new_name}'.", ephemeral=True)
                         thread = await client.fetch_channel(NEW_POST_CHANNEL_ID)
                         await thread.send(f"The series '{old_name}' has been renamed to '{new_name}'.")
-                send_email("Series renamed!",f"The series '{old_name}' has been renamed to '{new_name}' by {interaction.user.name}.")
                 conn.close()
             except Exception as e:
                 print(f"Error in renameSeries: {e}")
@@ -472,7 +392,6 @@ async def doLinkCheck(client):
             matched_series = [series_name for series_name in series_names if series_name.lower() in post.title.lower()]
             if (len(matched_series) == 0 or len(matched_series) > 1):
                 cursor.execute("INSERT INTO posts (id) VALUES (?)", (post.id,))
-                send_email("Series of post not recognized!",f"The series of post {post.id} with title {post.title} can be any one of the following: {matched_series}")
             else:
                 message += f"\nI think it is part of the series named {matched_series[0]}."
                 cursor.execute("INSERT INTO posts (id, seriesname) VALUES (?, ?)", (post.id,matched_series[0]))
