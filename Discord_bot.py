@@ -289,22 +289,16 @@ class MyClient(discord.Client):
                     cursor.execute("SELECT userid FROM subscriptions WHERE LOWER(seriesname) = LOWER(?) AND platform = 'discord'", (series_name,))
                     user_ids = [int(row[0]) for row in cursor.fetchall()]
                     if (len(user_ids) > 0):
-                        for guild in client.guilds:
-                            if guild.name == GUILD:
-                                thread = await client.fetch_channel(NEW_POST_CHANNEL_ID)
-                                # Find the original bot message about this post
-                                async for msg in thread.history(limit=50):
-                                    if postid in msg.content and msg.author == client.user:
-                                        # Get users subscribed to this series
-                                        tags = []
-                                        for member in guild.members:
-                                            if member.id in user_ids:
-                                                tags.append(member.mention)
-                                        reply = f"I first did not (correctly) recognize the series of this post, but I do recognize it now.\nIt is part of the series named {series_name}."
-                                        if len(tags) > 0:
-                                            reply += f"\nCircadians subscribed to this series: " + " ".join(tags)
-                                        await msg.reply(reply)
-                                        break
+                        thread = await client.fetch_channel(NEW_POST_CHANNEL_ID)
+                        # Find the original bot message about this post
+                        async for msg in thread.history(limit=50):
+                            if postid in msg.content and msg.author == client.user:
+                                tags = [f"<@{uid}>" for uid in user_ids]
+                                reply = f"I first did not (correctly) recognize the series of this post, but I do recognize it now.\nIt is part of the series named {series_name}."
+                                if len(tags) > 0:
+                                    reply += f"\nCircadians subscribed to this series: " + " ".join(tags)
+                                await msg.reply(reply)
+                                break
                 else:
                     if not post_exists:
                         await interaction.response.send_message(f"Post with ID '{postid}' not found in the database.", ephemeral=True)
@@ -397,12 +391,7 @@ async def doLinkCheck(client):
                 cursor.execute("INSERT INTO posts (id, seriesname) VALUES (?, ?)", (post.id,matched_series[0]))
                 cursor.execute("SELECT userid FROM subscriptions WHERE LOWER(seriesname) = LOWER(?) AND platform = 'discord'", (matched_series[0],))
                 user_ids = [int(row[0]) for row in cursor.fetchall()]
-                tags = []
-                for guild in client.guilds:
-                    if guild.name == GUILD:
-                        for member in guild.members:
-                            if member.id in user_ids:
-                                tags.append(member.mention)
+                tags = [f"<@{uid}>" for uid in user_ids]
                 if len(tags) > 0:
                     message += f"\nCircadians subscribed to this DailyGame: " + " ".join(tags)
             conn.commit()
@@ -498,7 +487,12 @@ async def activate_rugby_report(client):
                             continue
                         minute_match = re.match(r"(\d+)'", line)
                         if not minute_match:
-                            if len(line) > 0:
+                            second_match = re.match(r"\+(\d+) - (.*)", line)
+                            if second_match:
+                                second = int(second_match.group(1))
+                                message = second_match.group(2)
+                                scheduled.append((latest_event_time + timedelta(seconds=second), message))
+                            elif len(line) > 0:
                                 scheduled.append((latest_event_time + timedelta(seconds=20), line))
                             continue
                         minute = int(minute_match.group(1))
@@ -578,14 +572,9 @@ async def send_rugby_message(client):
                         cur.execute("DELETE FROM rugbymatchsubscriptions WHERE LOWER(matchname) = LOWER(?)", (f"{team_a} vs {team_b}",))
                         cur.execute("DELETE FROM rugbymatches WHERE LOWER(matchname) = LOWER(?)", (f"{team_a} vs {team_b}",))
 
-                    for guild in client.guilds:
-                        if guild.name == GUILD:
-                            tags = []
-                            for member in guild.members:
-                                if member.id in user_ids:
-                                    tags.append(member.mention)
-                            if len(tags) > 0:
-                                message += f"\nCircadians subscribed to this match: " + " ".join(tags)
+                    tags = [f"<@{uid}>" for uid in user_ids]
+                    if len(tags) > 0:
+                        message += f"\nCircadians subscribed to this match: " + " ".join(tags)
 
                 await thread.send(message)
                 cur.execute("DELETE FROM rugby_messages WHERE id = ?", (message_id,))
@@ -606,8 +595,9 @@ async def send_daily_date_message(client):
             last_date = cursor.fetchone()[0]
 
             if today != last_date:
-                response = requests.get(ICAL_URL)
+                response = await asyncio.to_thread(requests.get, ICAL_URL)
                 cal = Calendar.from_ical(response.content)
+                del response
 
                 print(f"Looking for calendar events on {today}")
                 for component in cal.walk():
@@ -630,7 +620,6 @@ async def send_daily_date_message(client):
         await asyncio.sleep(60)
 
 intents = discord.Intents.default()
-intents.members = True
 client = MyClient(intents=intents)
 
 @client.event
