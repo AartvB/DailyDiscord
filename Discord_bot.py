@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import requests
 from icalendar import Calendar
+from rugby_class import RugbyOddsCalculator
 
 AMSTERDAM_TZ = ZoneInfo("Europe/Amsterdam")
 UTC_TZ = ZoneInfo("UTC")
@@ -64,8 +65,19 @@ async def autocomplete_all_series(interaction: discord.Interaction, current: str
 async def autocomplete_rugby_team(interaction: discord.Interaction, current: str):
     with sqlite3.connect("rugby.db") as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT country FROM teams WHERE LOWER(country) LIKE ? AND username IN (SELECT teamA FROM planned_matches UNION SELECT teamB FROM planned_matches) order by country", (f"{current.lower()}%",))
-        return [discord.app_commands.Choice(name=row[0], value=row[0]) for row in cursor.fetchall()]
+        current_round = cursor.execute('SELECT round FROM bot_round').fetchone()[0]
+        cursor.execute('SELECT teamA, teamB FROM planned_matches WHERE round = ?', (current_round,))
+        matches = cursor.fetchall()
+        countries = set()
+        for match in matches:
+            cursor.execute('SELECT country FROM teams WHERE username = ?', (match[0],))
+            countries.add(cursor.fetchone()[0])
+            cursor.execute('SELECT country FROM teams WHERE username = ?', (match[1],))
+            countries.add(cursor.fetchone()[0])
+        return [discord.app_commands.Choice(name=country, value=country) for country in sorted(list(countries)) if country.lower().startswith(current.lower())]
+
+async def autocomplete_rugby_tactic(interaction: discord.Interaction, current: str):
+    return [discord.app_commands.Choice(name=tactic, value=tactic) for tactic in ["general", "insight", "physique", "technique"] if tactic.lower().startswith(current.lower())]
 
 class MyClient(discord.Client):
     async def setup_hook(self):
@@ -144,7 +156,7 @@ class MyClient(discord.Client):
         @self.tree.command(name="rugbysubscribe", description="Subscribe to a rugby match")
         @discord.app_commands.describe(text="The match to subscribe to")
         @discord.app_commands.autocomplete(text=autocomplete_subscribe_rugby_matches)
-        async def subscribe(interaction: discord.Interaction, text: str):
+        async def rugbysubscribe(interaction: discord.Interaction, text: str):
             try:
                 conn = sqlite3.connect("DailyGamesPosts.db")
                 cursor = conn.cursor()
@@ -161,13 +173,13 @@ class MyClient(discord.Client):
                 conn.close()
                 await interaction.response.send_message(f"You have subscribed to '{text}'.", ephemeral=True)
             except Exception as e:
-                print(f"Error in subscribe: {e}")
+                print(f"Error in rugbysubscribe: {e}")
                 await interaction.response.send_message(f"An error occurred while subscribing: {e}.", ephemeral=True)
 
         @self.tree.command(name="rugbyunsubscribe", description="Unsubscribe from a rugby match")
         @discord.app_commands.describe(text="The match to unsubscribe from")
         @discord.app_commands.autocomplete(text=autocomplete_unsubscribe_rugby_matches)
-        async def unsubscribe(interaction: discord.Interaction, text: str):
+        async def rugbyunsubscribe(interaction: discord.Interaction, text: str):
             try:
                 user_id = interaction.user.id
                 conn = sqlite3.connect("DailyGamesPosts.db")
@@ -184,22 +196,36 @@ class MyClient(discord.Client):
                     conn.close()
                     await interaction.response.send_message(f"You have unsubscribed from '{text}'.", ephemeral=True)
             except Exception as e:
-                print(f"Error in unsubscribe: {e}")
+                print(f"Error in rugbyunsubscribe: {e}")
                 await interaction.response.send_message(f"An error occurred while unsubscribing: {e}.", ephemeral=True)
 
         @self.tree.command(name="getrugbyodds", description="Get the odds for a rugby team to score within a certain range")
         @discord.app_commands.describe(team="The team to get odds for")
         @discord.app_commands.describe(min_points="The minimum points to consider")
         @discord.app_commands.describe(max_points="The maximum points to consider")
+        @discord.app_commands.describe(tactic="The tactic to consider")
+        @discord.app_commands.describe(opponent_tactic="The tactic of the opponent")
         @discord.app_commands.describe(private="Whether the result should be private")
         @discord.app_commands.autocomplete(team=autocomplete_rugby_team)
-        async def getrugbyodds(interaction: discord.Interaction, team: str, min_points: int, max_points: int, private: bool = True):
-            from rugby_class import RugbyOddsCalculator
-            roc = RugbyOddsCalculator()
+        @discord.app_commands.autocomplete(tactic=autocomplete_rugby_tactic)
+        @discord.app_commands.autocomplete(opponent_tactic=autocomplete_rugby_tactic)
+        async def getrugbyodds(interaction: discord.Interaction, team: str, min_points: int = None, max_points: int = None, tactic: str = None, opponent_tactic: str = None, private: bool = True):
             try:
-                result = roc.get_score_odds(team, min_points, max_points)
+                roc = RugbyOddsCalculator()
+                result = roc.get_score_odds(team, min_points, max_points, tactic, opponent_tactic)
 
-                await interaction.response.send_message(f"The odds for {team} to score at least {min_points} and no more than {max_points} points against {result[0]} are: {result[1]}", ephemeral=private)
+                tactic_str = f"the {tactic} tactic" if tactic else "no tactic"
+                opponent_tactic_str = f"the {opponent_tactic} tactic" if opponent_tactic else "no tactic"
+
+                if min_points is None and max_points is None:
+                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}) to score at least 0 points against {result[0]} (using {opponent_tactic_str}) are: {result[1]}", ephemeral=private)
+                elif min_points is None:
+                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}) to score no more than {max_points} points against {result[0]} (using {opponent_tactic_str}) are: {result[1]}", ephemeral=private)
+                elif max_points is None:
+                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}) to score at least {min_points} points against {result[0]} (using {opponent_tactic_str}) are: {result[1]}", ephemeral=private)
+                else:
+                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}) to score at least {min_points} and no more than {max_points} points against {result[0]} (using {opponent_tactic_str}) are: {result[1]}", ephemeral=private)
+
             except Exception as e:
                 print(f"Error in getrugbyodds: {e}")
                 await interaction.response.send_message(f"An error occurred while fetching the odds: {e}.", ephemeral=True)
@@ -339,7 +365,7 @@ class MyClient(discord.Client):
         @self.tree.command(name="detectad", description="Let me know when you found a reddit post containing an advertisement")
         @discord.app_commands.describe(post_link="The link to the reddit post containing the advertisement")
         async def detectad(interaction: discord.Interaction, post_link: str):
-            match = re.search(r'reddit\.com/r/dailygames/comments/([a-z0-9]+)/', post_link)
+            match = re.search(r'reddit\.com/r/dailygames/comments/([a-z0-9]+)', post_link)
             if not match:
                 await interaction.response.send_message("Invalid Reddit link format. Please provide a link to a DailyGames reddit post.", ephemeral=True)
                 return
@@ -538,6 +564,8 @@ async def activate_rugby_report(client):
                 os.remove(filename)
         except Exception as e:
             print(f"Error processing rugby report: {e}")
+            thread = await client.fetch_channel(TEST_CHANNEL_ID)
+            await thread.send(f"Error processing rugby report: {e}")
         await asyncio.sleep(60)
 
 async def send_rugby_message(client):
