@@ -229,30 +229,34 @@ class MyClient(discord.Client):
         @discord.app_commands.describe(max_points="The maximum points to consider")
         @discord.app_commands.describe(tactic="The tactic to consider")
         @discord.app_commands.describe(opponent_tactic="The tactic of the opponent")
+        @discord.app_commands.describe(cake="Whether the team uses a cake")
+        @discord.app_commands.describe(opponent_cake="Whether the opponent uses a cake")
         @discord.app_commands.describe(private="Whether the result should be private")
         @discord.app_commands.describe(decimals="The number of decimals to round the odds to")
         @discord.app_commands.autocomplete(team=autocomplete_rugby_team)
         @discord.app_commands.autocomplete(tactic=autocomplete_rugby_tactic)
         @discord.app_commands.autocomplete(opponent_tactic=autocomplete_rugby_tactic)
-        async def getrugbyodds(interaction: discord.Interaction, team: str, min_points: int = None, max_points: int = None, tactic: str = None, opponent_tactic: str = None, decimals: int = 2, private: bool = True):
+        async def getrugbyodds(interaction: discord.Interaction, team: str, min_points: int = None, max_points: int = None, tactic: str = None, opponent_tactic: str = None, cake: bool = False, opponent_cake: bool = False, decimals: int = 2, private: bool = True):
             try:
                 roc = RugbyOddsCalculator()
-                result = roc.get_score_odds(team, min_points, max_points, tactic, opponent_tactic)
+                result = roc.get_score_odds(team, min_points, max_points, tactic, opponent_tactic, cake, opponent_cake)
                 tactic_str = f"the {tactic} tactic" if tactic else "no tactic"
                 opponent_tactic_str = f"the {opponent_tactic} tactic" if opponent_tactic else "no tactic"
+                cake_str = " and a cake" if cake else ""
+                opponent_cake_str = " and a cake" if opponent_cake else ""
 
                 if decimals < 0 or decimals > 10:
                     await interaction.response.send_message("The number of decimals must be an integer between 0 and 10.", ephemeral=True)
                     return
 
                 if min_points is None and max_points is None:
-                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}) to score at least 0 points against {result[0]} (using {opponent_tactic_str}) are: {result[1]:.{decimals}f}", ephemeral=private)
+                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}{cake_str}) to score at least 0 points against {result[0]} (using {opponent_tactic_str}{opponent_cake_str}) are: {result[1]:.{decimals}f}", ephemeral=private)
                 elif min_points is None:
-                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}) to score no more than {max_points} points against {result[0]} (using {opponent_tactic_str}) are: {result[1]:.{decimals}f}", ephemeral=private)
+                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}{cake_str}) to score no more than {max_points} points against {result[0]} (using {opponent_tactic_str}{opponent_cake_str}) are: {result[1]:.{decimals}f}", ephemeral=private)
                 elif max_points is None:
-                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}) to score at least {min_points} points against {result[0]} (using {opponent_tactic_str}) are: {result[1]:.{decimals}f}", ephemeral=private)
+                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}{cake_str}) to score at least {min_points} points against {result[0]} (using {opponent_tactic_str}{opponent_cake_str}) are: {result[1]:.{decimals}f}", ephemeral=private)
                 else:
-                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}) to score at least {min_points} and no more than {max_points} points against {result[0]} (using {opponent_tactic_str}) are: {result[1]:.{decimals}f}", ephemeral=private)
+                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}{cake_str}) to score at least {min_points} and no more than {max_points} points against {result[0]} (using {opponent_tactic_str}{opponent_cake_str}) are: {result[1]:.{decimals}f}", ephemeral=private)
 
             except Exception as e:
                 print(f"Error in getrugbyodds: {e}")
