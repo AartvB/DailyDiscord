@@ -32,8 +32,15 @@ async def autocomplete_subscribe_rugby_matches(interaction: discord.Interaction,
     user_id = interaction.user.id
     with sqlite3.connect("DailyGamesPosts.db") as conn:
         cursor = conn.cursor()
+        cursor.execute("SELECT matchname FROM rugbymatchsubscriptions WHERE userid = ?", (user_id,))
+        subscribed_matches = [row[0] for row in cursor.fetchall()]
         cursor.execute("SELECT matchname FROM rugbymatches WHERE LOWER(matchname) LIKE ? AND matchname NOT IN (SELECT matchname FROM rugbymatchsubscriptions WHERE userid = ?) ORDER BY matchname", (f"{current.lower()}%", user_id))
-        return [discord.app_commands.Choice(name=row[0], value=row[0]) for row in cursor.fetchall()]
+        matches = [row[0] for row in cursor.fetchall()]
+        with sqlite3.connect("rugby.db") as conn2:
+            cursor2 = conn2.cursor()
+            cursor2.execute("SELECT country FROM teams WHERE LOWER(country) LIKE ?", (f"{current.lower()}%",))
+            countries = [row[0] for row in cursor2.fetchall() if row[0] not in subscribed_matches]
+            return [discord.app_commands.Choice(name=match, value=match) for match in matches] + [discord.app_commands.Choice(name=country, value=country) for country in countries]
 
 async def autocomplete_unsubscribe_rugby_matches(interaction: discord.Interaction, current: str):
     user_id = interaction.user.id
@@ -67,9 +74,16 @@ async def autocomplete_rugby_team(interaction: discord.Interaction, current: str
         cursor = conn.cursor()
         current_round = cursor.execute('SELECT round FROM bot_round').fetchone()[0]
         cursor.execute('SELECT teamA, teamB FROM planned_matches WHERE round = ?', (current_round,))
+        planned_matches = cursor.fetchall()
+        cursor.execute('SELECT team1, team2 FROM matches WHERE round = ?', (current_round,))
         matches = cursor.fetchall()
         countries = set()
         for match in matches:
+            cursor.execute('SELECT country FROM teams WHERE username = ?', (match[0],))
+            countries.add(cursor.fetchone()[0])
+            cursor.execute('SELECT country FROM teams WHERE username = ?', (match[1],))
+            countries.add(cursor.fetchone()[0])
+        for match in planned_matches:
             cursor.execute('SELECT country FROM teams WHERE username = ?', (match[0],))
             countries.add(cursor.fetchone()[0])
             cursor.execute('SELECT country FROM teams WHERE username = ?', (match[1],))
@@ -101,7 +115,10 @@ class MyClient(discord.Client):
                 series_rows = [row[0] for row in cursor.fetchall()]
                 series_map = {name.lower(): name for name in series_rows}
                 if text.lower() not in series_map:
-                    await interaction.response.send_message(f"Series '{text}' not found. Available series: {', '.join(series_rows)}", ephemeral=True)
+                    message = f"Series '{text}' not found. Available series: {', '.join(series_rows)}"
+                    if len(message) > 2000:
+                        message = message[:1997] + "..."
+                    await interaction.response.send_message(message, ephemeral=True)
                     conn.close()
                     return
                 actual_name = series_map[text.lower()]
@@ -153,8 +170,8 @@ class MyClient(discord.Client):
                 print(f"Error in viewSubscriptions: {e}")
                 await interaction.response.send_message(f"An error occurred while viewing subscriptions: {e}.", ephemeral=True)
 
-        @self.tree.command(name="rugbysubscribe", description="Subscribe to a rugby match")
-        @discord.app_commands.describe(text="The match to subscribe to")
+        @self.tree.command(name="rugbysubscribe", description="Subscribe to a rugby match or team")
+        @discord.app_commands.describe(text="The match or team to subscribe to")
         @discord.app_commands.autocomplete(text=autocomplete_subscribe_rugby_matches)
         async def rugbysubscribe(interaction: discord.Interaction, text: str):
             try:
@@ -164,11 +181,18 @@ class MyClient(discord.Client):
                 match_rows = [row[0] for row in cursor.fetchall()]
                 match_map = {name.lower(): name for name in match_rows}
                 if text.lower() not in match_map:
-                    await interaction.response.send_message(f"Match '{text}' not found. Available matches: {', '.join(match_rows)}", ephemeral=True)
-                    conn.close()
-                    return
-                actual_name = match_map[text.lower()]
-                cursor.execute("INSERT OR IGNORE INTO rugbymatchsubscriptions (userid, matchname) VALUES (?, ?)", (interaction.user.id, actual_name))
+                    conn2 = sqlite3.connect("rugby.db")
+                    cursor2 = conn2.cursor()
+                    cursor2.execute("SELECT country from teams")
+                    match_rows = [row[0] for row in cursor2.fetchall()]
+                    match_map = {name.lower(): name for name in match_rows}
+                    conn2.close()
+                    if text.lower() not in match_map:
+                        await interaction.response.send_message(f"Match or team '{text}' not found. Available matches: {', '.join(match_rows)}", ephemeral=True)
+                        conn.close()
+                        return
+                    cursor.execute("INSERT OR IGNORE INTO rugbymatchsubscriptions (userid, matchname) SELECT ?, matchname FROM rugbymatches WHERE matchname LIKE ?", (interaction.user.id, f"%{match_map[text.lower()]}%"))
+                cursor.execute("INSERT OR IGNORE INTO rugbymatchsubscriptions (userid, matchname) VALUES (?, ?)", (interaction.user.id, match_map[text.lower()]))
                 conn.commit()
                 conn.close()
                 await interaction.response.send_message(f"You have subscribed to '{text}'.", ephemeral=True)
@@ -176,8 +200,8 @@ class MyClient(discord.Client):
                 print(f"Error in rugbysubscribe: {e}")
                 await interaction.response.send_message(f"An error occurred while subscribing: {e}.", ephemeral=True)
 
-        @self.tree.command(name="rugbyunsubscribe", description="Unsubscribe from a rugby match")
-        @discord.app_commands.describe(text="The match to unsubscribe from")
+        @self.tree.command(name="rugbyunsubscribe", description="Unsubscribe from a rugby match or team")
+        @discord.app_commands.describe(text="The match or team to unsubscribe from")
         @discord.app_commands.autocomplete(text=autocomplete_unsubscribe_rugby_matches)
         async def rugbyunsubscribe(interaction: discord.Interaction, text: str):
             try:
@@ -206,25 +230,29 @@ class MyClient(discord.Client):
         @discord.app_commands.describe(tactic="The tactic to consider")
         @discord.app_commands.describe(opponent_tactic="The tactic of the opponent")
         @discord.app_commands.describe(private="Whether the result should be private")
+        @discord.app_commands.describe(decimals="The number of decimals to round the odds to")
         @discord.app_commands.autocomplete(team=autocomplete_rugby_team)
         @discord.app_commands.autocomplete(tactic=autocomplete_rugby_tactic)
         @discord.app_commands.autocomplete(opponent_tactic=autocomplete_rugby_tactic)
-        async def getrugbyodds(interaction: discord.Interaction, team: str, min_points: int = None, max_points: int = None, tactic: str = None, opponent_tactic: str = None, private: bool = True):
+        async def getrugbyodds(interaction: discord.Interaction, team: str, min_points: int = None, max_points: int = None, tactic: str = None, opponent_tactic: str = None, decimals: int = 2, private: bool = True):
             try:
                 roc = RugbyOddsCalculator()
                 result = roc.get_score_odds(team, min_points, max_points, tactic, opponent_tactic)
-
                 tactic_str = f"the {tactic} tactic" if tactic else "no tactic"
                 opponent_tactic_str = f"the {opponent_tactic} tactic" if opponent_tactic else "no tactic"
 
+                if decimals < 0 or decimals > 10:
+                    await interaction.response.send_message("The number of decimals must be an integer between 0 and 10.", ephemeral=True)
+                    return
+
                 if min_points is None and max_points is None:
-                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}) to score at least 0 points against {result[0]} (using {opponent_tactic_str}) are: {result[1]}", ephemeral=private)
+                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}) to score at least 0 points against {result[0]} (using {opponent_tactic_str}) are: {result[1]:.{decimals}f}", ephemeral=private)
                 elif min_points is None:
-                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}) to score no more than {max_points} points against {result[0]} (using {opponent_tactic_str}) are: {result[1]}", ephemeral=private)
+                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}) to score no more than {max_points} points against {result[0]} (using {opponent_tactic_str}) are: {result[1]:.{decimals}f}", ephemeral=private)
                 elif max_points is None:
-                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}) to score at least {min_points} points against {result[0]} (using {opponent_tactic_str}) are: {result[1]}", ephemeral=private)
+                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}) to score at least {min_points} points against {result[0]} (using {opponent_tactic_str}) are: {result[1]:.{decimals}f}", ephemeral=private)
                 else:
-                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}) to score at least {min_points} and no more than {max_points} points against {result[0]} (using {opponent_tactic_str}) are: {result[1]}", ephemeral=private)
+                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}) to score at least {min_points} and no more than {max_points} points against {result[0]} (using {opponent_tactic_str}) are: {result[1]:.{decimals}f}", ephemeral=private)
 
             except Exception as e:
                 print(f"Error in getrugbyodds: {e}")
@@ -394,7 +422,6 @@ class MyClient(discord.Client):
                 await interaction.response.send_message(f"An error occurred while processing the advertisement: {e}.", ephemeral=True)
 
 async def doLinkCheck(client):
-    print("New post check")
     conn = sqlite3.connect("DailyGamesPosts.db")
     cursor = conn.cursor()
     posts = []
@@ -502,6 +529,7 @@ async def activate_rugby_report(client):
                     scheduled.append((game_start, f"The game between {team_a} and {team_b} begins!"))
                     if game_start > now:
                         cur.execute("INSERT OR IGNORE INTO rugbymatches (matchname) VALUES (?)", (f"{team_a} vs {team_b}",))
+                        cur.execute("INSERT OR IGNORE INTO rugbymatchsubscriptions (matchname, userid) SELECT ?, userid FROM rugbymatchsubscriptions WHERE matchname = ? OR matchname = ?", (f"{team_a} vs {team_b}", team_a, team_b))
 
                     halftime_minute = None
                     final_score_line = None
@@ -543,7 +571,7 @@ async def activate_rugby_report(client):
                     # Final score 1 minute after last event
                     if final_score_line:
                         scheduled.append((game_start + timedelta(minutes=96), final_score_line))
-                        schedule_list.append((game_start + timedelta(minutes=96, seconds=20),final_score_line + "\n", f"{team_a} vs {team_b} at <t:{int(game_start.timestamp())}:f>\n"))
+                        schedule_list.append((game_start + timedelta(minutes=96, seconds=20),final_score_line + "\n", f"{team_a} vs {team_b} at <t:{int(game_start.timestamp())}:f> (<t:{int(game_start.timestamp())}:R>)\n"))
 
                     # Insert into database
                     for scheduled_time, message in scheduled:
@@ -589,16 +617,18 @@ async def send_rugby_message(client):
 
                 is_first_reminder = re.match(r"Reminder: (.+) vs (.+) starts in 1 hour and 30 minutes!", message)
                 is_game_start = re.match(r"The game between (.+) and (.+) begins!", message)
-                if is_first_reminder or is_game_start:
-                    match_obj = re.match(r"Reminder: (.+?) vs (.+?) starts in .+!|The game between (.+?) and (.+?) begins!", message)
-                    team_a = (match_obj.group(1) or match_obj.group(3)).strip()
-                    team_b = (match_obj.group(2) or match_obj.group(4)).strip()
-                    cur.execute("SELECT userid FROM rugbymatchsubscriptions WHERE LOWER(matchname) = LOWER(?)", (f"{team_a} vs {team_b}",))
+                is_end_of_break = re.match(r"The second half begins!", message)
+                is_end_of_game = re.match(r"Final score", message)
+                if is_first_reminder:
+                    cur.execute("UPDATE currentmatch SET matchname = ?", (f"{is_first_reminder.group(1)} vs {is_first_reminder.group(2)}",))
+                currentmatch = cur.execute("SELECT matchname FROM currentmatch").fetchone()[0]
+                if is_first_reminder or is_game_start or is_end_of_break or is_end_of_game:
+                    cur.execute("SELECT userid FROM rugbymatchsubscriptions WHERE LOWER(matchname) = LOWER(?)", (currentmatch,))
                     user_ids = [int(row[0]) for row in cur.fetchall()]
 
-                    if is_game_start:
-                        cur.execute("DELETE FROM rugbymatchsubscriptions WHERE LOWER(matchname) = LOWER(?)", (f"{team_a} vs {team_b}",))
-                        cur.execute("DELETE FROM rugbymatches WHERE LOWER(matchname) = LOWER(?)", (f"{team_a} vs {team_b}",))
+                    if is_end_of_game:
+                        cur.execute("DELETE FROM rugbymatchsubscriptions WHERE LOWER(matchname) = LOWER(?)", (currentmatch,))
+                        cur.execute("DELETE FROM rugbymatches WHERE LOWER(matchname) = LOWER(?)", (currentmatch,))
 
                     tags = [f"<@{uid}>" for uid in user_ids]
                     if len(tags) > 0:
