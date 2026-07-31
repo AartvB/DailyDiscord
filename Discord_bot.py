@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import requests
 from icalendar import Calendar
-from rugby_class import RugbyOddsCalculator
+from dailyrugby import DailyRugby
 
 AMSTERDAM_TZ = ZoneInfo("Europe/Amsterdam")
 UTC_TZ = ZoneInfo("UTC")
@@ -70,28 +70,60 @@ async def autocomplete_all_series(interaction: discord.Interaction, current: str
         return [discord.app_commands.Choice(name=row[0], value=row[0]) for row in cursor.fetchall()]
 
 async def autocomplete_rugby_team(interaction: discord.Interaction, current: str):
-    with sqlite3.connect("rugby.db") as conn:
-        cursor = conn.cursor()
-        current_round = cursor.execute('SELECT round FROM bot_round').fetchone()[0]
-        cursor.execute('SELECT teamA, teamB FROM planned_matches WHERE round = ?', (current_round,))
-        planned_matches = cursor.fetchall()
-        cursor.execute('SELECT team1, team2 FROM matches WHERE round = ?', (current_round,))
-        matches = cursor.fetchall()
-        countries = set()
-        for match in matches:
-            cursor.execute('SELECT country FROM teams WHERE username = ?', (match[0],))
-            countries.add(cursor.fetchone()[0])
-            cursor.execute('SELECT country FROM teams WHERE username = ?', (match[1],))
-            countries.add(cursor.fetchone()[0])
-        for match in planned_matches:
-            cursor.execute('SELECT country FROM teams WHERE username = ?', (match[0],))
-            countries.add(cursor.fetchone()[0])
-            cursor.execute('SELECT country FROM teams WHERE username = ?', (match[1],))
-            countries.add(cursor.fetchone()[0])
-        return [discord.app_commands.Choice(name=country, value=country) for country in sorted(list(countries)) if country.lower().startswith(current.lower())]
+    dr = DailyRugby()
+    current_round = dr.get_next_round()
+    dr.cursor().execute('SELECT teamA, teamB FROM planned_matches WHERE round = ?', (current_round,))
+    planned_matches = dr.cursor().fetchall()
+    dr.cursor().execute('SELECT teamA, teamB FROM matches WHERE round = ?', (current_round,))
+    matches = dr.cursor().fetchall()
+    countries = set()
+    for match in matches:
+        dr.cursor().execute('SELECT country FROM teams WHERE username = ?', (match[0],))
+        countries.add(dr.cursor().fetchone()[0])
+        dr.cursor().execute('SELECT country FROM teams WHERE username = ?', (match[1],))
+        countries.add(dr.cursor().fetchone()[0])
+    for match in planned_matches:
+        dr.cursor().execute('SELECT country FROM teams WHERE username = ?', (match[0],))
+        countries.add(dr.cursor().fetchone()[0])
+        dr.cursor().execute('SELECT country FROM teams WHERE username = ?', (match[1],))
+        countries.add(dr.cursor().fetchone()[0])
+    return [discord.app_commands.Choice(name=country, value=country) for country in sorted(list(countries)) if country.lower().startswith(current.lower())]
+
+async def autocomplete_cheer(interaction: discord.Interaction, current: str):
+    try:
+        dr = DailyRugby()
+        if not dr.match_is_ongoing():
+            return []
+        teamA, teamB = dr.cursor().execute("SELECT teamA, teamB FROM current_match_state").fetchone()
+        countries = [dr.get_country(teamA), dr.get_country(teamB)]
+        return [discord.app_commands.Choice(name=country, value=country) for country in countries if country.lower().startswith(current.lower())]
+    except Exception as e:
+        print(f"Error in autocomplete_cheer: {e}")
+        return []
 
 async def autocomplete_rugby_tactic(interaction: discord.Interaction, current: str):
     return [discord.app_commands.Choice(name=tactic, value=tactic) for tactic in ["general", "insight", "physique", "technique"] if tactic.lower().startswith(current.lower())]
+
+def setup_database():
+    with sqlite3.connect("DailyGamesPosts.db") as conn:
+        cursor = conn.cursor()
+        cursor.execute('CREATE TABLE IF NOT EXISTS currentmatch (matchname TEXT PRIMARY KEY)')
+        cursor.execute('CREATE TABLE IF NOT EXISTS latest_ad (timestamp INTEGER PRIMARY KEY)')
+        cursor.execute('CREATE TABLE IF NOT EXISTS latest_daily_message (date TEXT PRIMARY KEY)')
+        cursor.execute('CREATE TABLE IF NOT EXISTS posts (id TEXT PRIMARY KEY, seriesname TEXT)')
+        cursor.execute("CREATE TABLE IF NOT EXISTS rugby_messages (id INTEGER PRIMARY KEY, scheduled_time DATETIME NOT NULL, message TEXT NOT NULL, query TEXT NOT NULL DEFAULT '')")
+        cursor.execute('CREATE TABLE IF NOT EXISTS rugbymatches (matchname TEXT PRIMARY KEY, timestamp INTEGER)')
+        cursor.execute('CREATE TABLE IF NOT EXISTS rugbymatchsubscriptions (userid INTEGER, matchname TEXT, PRIMARY KEY (userid, matchname))')
+        cursor.execute('CREATE TABLE IF NOT EXISTS series (name TEXT PRIMARY KEY)')
+        cursor.execute('CREATE TABLE IF NOT EXISTS subscriptions (userid INTEGER, seriesname TEXT, platform TEXT, PRIMARY KEY (userid, seriesname, platform))')
+        conn.commit()
+        if (cursor.execute('SELECT COUNT(*) FROM currentmatch').fetchone()[0] == 0):
+            cursor.execute('INSERT INTO currentmatch (matchname) VALUES (?)', ('Test',))
+        if (cursor.execute('SELECT COUNT(*) FROM latest_ad').fetchone()[0] == 0):
+            cursor.execute('INSERT INTO latest_ad (timestamp) VALUES (?)', (0,))
+        if (cursor.execute('SELECT COUNT(*) FROM latest_daily_message').fetchone()[0] == 0):
+            cursor.execute('INSERT INTO latest_daily_message (date) VALUES (?)', (datetime.now().strftime("%Y-%m-%d"),))
+        conn.commit()
 
 class MyClient(discord.Client):
     async def setup_hook(self):
@@ -102,6 +134,7 @@ class MyClient(discord.Client):
         self.rugby_task = self.loop.create_task(activate_rugby_report(self))
         self.rugby_message_task = self.loop.create_task(send_rugby_message(self))
         self.date_task = self.loop.create_task(send_daily_date_message(self))
+        self.rugby_schedule_task = self.loop.create_task(schedule_rugby_matches(self))
         self.tree = discord.app_commands.CommandTree(self)
 
         @self.tree.command(name="subscribe", description="Subscribe to a DailyGame")
@@ -223,10 +256,77 @@ class MyClient(discord.Client):
                 print(f"Error in rugbyunsubscribe: {e}")
                 await interaction.response.send_message(f"An error occurred while unsubscribing: {e}.", ephemeral=True)
 
-        @self.tree.command(name="getrugbyodds", description="Get the odds for a rugby team to score within a certain range")
+        @self.tree.command(name="getrugbydescription", description="Get the description of a rugby team")
+        @discord.app_commands.describe(team="The team to get the description for")
+        @discord.app_commands.describe(number="The number of the player to get the description for (if left empty, the team description will be returned)")
+        @discord.app_commands.describe(probabilities="Whether to include the current probabilities for the team (only for teams, not players)")
+        @discord.app_commands.describe(private="Whether the result should be private")
+        @discord.app_commands.autocomplete(team=autocomplete_cheer)
+        async def getrugbydescription(interaction: discord.Interaction, team: str, number: int = None, probabilities: bool = False, private: bool = True):
+            try:
+                dr = DailyRugby()
+                if not dr.match_is_ongoing():
+                    await interaction.response.send_message("There is no ongoing match to get a description for.", ephemeral=True)
+                    return
+                
+                if number is not None and (number < 1 or number > 23):
+                    await interaction.response.send_message("Player number must be between 1 and 23.", ephemeral=True)
+                    return
+                teams = dr.cursor().execute("SELECT teamA, teamB FROM current_match_state").fetchone()
+                if dr.get_username(team) not in teams:
+                    await interaction.response.send_message(f"{team} is not playing in the current match.", ephemeral=True)
+                    return
+
+                if number is not None:
+                    await interaction.response.send_message(dr.get_player_description_long(team, number), ephemeral=private)
+                else:
+                    await interaction.response.send_message(dr.get_team_description(team, probabilities), ephemeral=private)
+            except Exception as e:
+                print(f"Error in getrugbydescription: {e}")
+                await interaction.response.send_message(f"An error occurred while fetching the description: {e}.", ephemeral=True)
+
+        @self.tree.command(name="cheer", description="Cheer for a rugby team")
+        @discord.app_commands.describe(team="The team to cheer for")
+        @discord.app_commands.describe(yell="The cheer to yell")
+        @discord.app_commands.autocomplete(team=autocomplete_cheer)
+        async def cheer(interaction: discord.Interaction, team: str, yell: str = None):
+            try:
+                dr = DailyRugby()
+                if not dr.match_is_ongoing():
+                    await interaction.response.send_message("There is no ongoing match to cheer for.", ephemeral=True)
+                    return
+
+                if yell is not None and len(yell) > 1500:
+                    await interaction.response.send_message("Your cheer is too long. Please limit it to 1500 characters.", ephemeral=True)
+                    return
+                
+                teams = dr.cursor().execute("SELECT teamA, teamB FROM current_match_state").fetchone()
+                if dr.get_username(team) not in teams:
+                    await interaction.response.send_message(f"{team} is not playing in the current match.", ephemeral=True)
+                    return
+
+                next_minute = dr.cursor().execute("SELECT last_minute FROM current_match_state").fetchone()[0] + 1
+                user_id = interaction.user.id
+                user_is_cheering = dr.cursor().execute("SELECT COUNT(uses_left) FROM cheers WHERE user_id = ? AND uses_left > 0", (user_id,)).fetchone()[0] > 0
+                if user_is_cheering:
+                    await interaction.response.send_message("You are still cheering, you can only cheer once per two minutes.", ephemeral=True)
+                    return
+                
+                number_of_cheers = dr.cursor().execute("SELECT COUNT(uses_left) FROM cheers WHERE user_id = ?", (user_id,)).fetchone()[0]
+                if number_of_cheers >= 3:
+                    await interaction.response.send_message("You have already cheered 3 times, you can only cheer 3 times per match.", ephemeral=True)
+                    return
+
+                username = dr.get_username(team)
+                dr.cursor().execute("INSERT INTO cheers (user_id, minute, uses_left, team, yell) VALUES (?, ?, 2, ?, ?)", (user_id, next_minute, username, yell))
+                dr.conn().commit()
+                await interaction.response.send_message(f"Your cheer for {team} has been scheduled!", ephemeral=True)
+            except Exception as e:
+                print(f"Error in cheer: {e}")
+                await interaction.response.send_message(f"An error occurred while cheering: {e}.", ephemeral=True)
+
+        @self.tree.command(name="getrugbyodds", description="Get the odds for a rugby team to win")
         @discord.app_commands.describe(team="The team to get odds for")
-        @discord.app_commands.describe(min_points="The minimum points to consider")
-        @discord.app_commands.describe(max_points="The maximum points to consider")
         @discord.app_commands.describe(tactic="The tactic to consider")
         @discord.app_commands.describe(opponent_tactic="The tactic of the opponent")
         @discord.app_commands.describe(cake="Whether the team uses a cake")
@@ -236,10 +336,26 @@ class MyClient(discord.Client):
         @discord.app_commands.autocomplete(team=autocomplete_rugby_team)
         @discord.app_commands.autocomplete(tactic=autocomplete_rugby_tactic)
         @discord.app_commands.autocomplete(opponent_tactic=autocomplete_rugby_tactic)
-        async def getrugbyodds(interaction: discord.Interaction, team: str, min_points: int = None, max_points: int = None, tactic: str = None, opponent_tactic: str = None, cake: bool = False, opponent_cake: bool = False, decimals: int = 2, private: bool = True):
+        async def getrugbyodds(interaction: discord.Interaction, team: str, tactic: str = None, opponent_tactic: str = None, cake: bool = False, opponent_cake: bool = False, decimals: int = 2, private: bool = True):
             try:
-                roc = RugbyOddsCalculator()
-                result = roc.get_score_odds(team, min_points, max_points, tactic, opponent_tactic, cake, opponent_cake)
+                dr = DailyRugby()
+                teams = dr.cursor().execute("SELECT country FROM teams").fetchall()
+                if team not in [t[0] for t in teams]:
+                    await interaction.response.send_message(f"{team} is not a valid rugby team.", ephemeral=True)
+                    return
+                
+                if not dr.calculated_all_match_outcomes(team):
+                    await interaction.response.send_message("The match outcomes have not been calculated yet. Please try again later.", ephemeral=True)
+                    return
+                current_round = dr.get_next_round()
+                username = dr.get_username(team)
+                opponent = dr.cursor().execute("SELECT teamB FROM planned_matches WHERE teamA = ? AND round = ? UNION SELECT teamA FROM planned_matches WHERE teamB = ? AND round = ?", (username, current_round, username, current_round)).fetchone()
+                if not opponent:
+                    await interaction.response.send_message(f"No opponent found for {team} in round {current_round}.", ephemeral=True)
+                    return
+                opponent = dr.get_country(opponent[0])
+
+                result = dr.get_match_probability(team, opponent, tacticA = tactic, tacticB = opponent_tactic, morale_bonusA = dr.get_morale_bonus(team, current_round), morale_bonusB = dr.get_morale_bonus(opponent, current_round), cakeA = cake, cakeB = opponent_cake)[team]
                 tactic_str = f"the {tactic} tactic" if tactic else "no tactic"
                 opponent_tactic_str = f"the {opponent_tactic} tactic" if opponent_tactic else "no tactic"
                 cake_str = " and a cake" if cake else ""
@@ -248,15 +364,7 @@ class MyClient(discord.Client):
                 if decimals < 0 or decimals > 10:
                     await interaction.response.send_message("The number of decimals must be an integer between 0 and 10.", ephemeral=True)
                     return
-
-                if min_points is None and max_points is None:
-                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}{cake_str}) to score at least 0 points against {result[0]} (using {opponent_tactic_str}{opponent_cake_str}) are: {result[1]:.{decimals}f}", ephemeral=private)
-                elif min_points is None:
-                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}{cake_str}) to score no more than {max_points} points against {result[0]} (using {opponent_tactic_str}{opponent_cake_str}) are: {result[1]:.{decimals}f}", ephemeral=private)
-                elif max_points is None:
-                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}{cake_str}) to score at least {min_points} points against {result[0]} (using {opponent_tactic_str}{opponent_cake_str}) are: {result[1]:.{decimals}f}", ephemeral=private)
-                else:
-                    await interaction.response.send_message(f"The odds for {team} (using {tactic_str}{cake_str}) to score at least {min_points} and no more than {max_points} points against {result[0]} (using {opponent_tactic_str}{opponent_cake_str}) are: {result[1]:.{decimals}f}", ephemeral=private)
+                await interaction.response.send_message(f"The odds for {team} (using {tactic_str}{cake_str}) to win against {opponent} (using {opponent_tactic_str}{opponent_cake_str}) are: {result:.{decimals}f}", ephemeral=private)
 
             except Exception as e:
                 print(f"Error in getrugbyodds: {e}")
@@ -483,168 +591,135 @@ async def process_txt_files(client):
             print(f"Error processing bot_domain_message file: {e}")
         await asyncio.sleep(10)
 
+async def schedule_rugby_matches(client):
+    await client.wait_until_ready()
+    while not client.is_closed():
+        try:
+            dr = DailyRugby()
+            if not dr.match_is_ongoing():
+                with sqlite3.connect("DailyGamesPosts.db") as dg_conn, sqlite3.connect("rugby.db") as rugby_conn:
+                    dg_cur = dg_conn.cursor()
+                    rugby_cur = rugby_conn.cursor()
+
+                    stored_matches = dg_cur.execute("SELECT matchname, timestamp FROM rugbymatches").fetchall()
+                    scheduled_matches = rugby_cur.execute("SELECT teamA, teamB, timestamp, round FROM scheduled_matches ORDER BY timestamp ASC").fetchall()
+
+                    now = datetime.now(UTC_TZ)
+                    if len(scheduled_matches) > 0:
+                        current_round = scheduled_matches[0][3]
+                        if dr.all_matches_scheduled():
+                            updated = False
+                            for teamA, teamB, timestamp, _ in scheduled_matches:
+                                match_name = f"{dr.get_country(teamA)} vs {dr.get_country(teamB)}"
+                                if ((match_name, timestamp) not in stored_matches) and (timestamp > now.timestamp()):
+                                    print(f"Updating rugby matches: {match_name} at {timestamp}")
+                                    dg_cur.execute("INSERT OR REPLACE INTO rugbymatches (matchname, timestamp) VALUES (?, ?)", (match_name, timestamp))
+                                    updated = True
+
+                            if updated:
+                                print("Rugby matches updated in DailyGamesPosts.db")
+                                dg_cur.execute("DELETE FROM rugby_messages")
+                                dg_conn.commit()
+                                played_matches = rugby_cur.execute("SELECT teamA, teamB, teamA_points, teamB_points FROM matches WHERE round = ?", (current_round,)).fetchall()
+                                schedule_message = "These are the matches of this round:\n"
+
+                                played_lookup = {(pm[0], pm[1]): (pm[2], pm[3]) for pm in played_matches}
+                                for teamA, teamB, timestamp, _ in scheduled_matches:
+                                    if (teamA, teamB) in played_lookup:
+                                        teamA_points, teamB_points = played_lookup[(teamA, teamB)]
+                                        schedule_message += f"\nFinal Score: {dr.get_country(teamA)} {teamA_points} - {teamB_points} {dr.get_country(teamB)}"
+                                    else:
+                                        schedule_message += f"\n{dr.get_country(teamA)} vs {dr.get_country(teamB)} at <t:{timestamp}:f> (<t:{timestamp}:R>)"
+
+                                        game_start = datetime.fromtimestamp(timestamp, tz=UTC_TZ)
+                                        if game_start - timedelta(hours=1, minutes=30) > now:
+                                            dg_cur.execute("INSERT INTO rugby_messages (scheduled_time, message) VALUES (?, ?)", ((game_start - timedelta(hours=1, minutes=30)).isoformat(),  f"Reminder: {dr.get_country(teamA)} vs {dr.get_country(teamB)} starts in 1 hour and 30 minutes!"))
+                                        if game_start - timedelta(minutes=45) > now:
+                                            dg_cur.execute("INSERT INTO rugby_messages (scheduled_time, message) VALUES (?, ?)", ((game_start - timedelta(minutes=45)).isoformat(),  f"Reminder: {dr.get_country(teamA)} vs {dr.get_country(teamB)} starts in 45 minutes!"))
+                                        if game_start - timedelta(minutes=10) > now:
+                                            dg_cur.execute("INSERT INTO rugby_messages (scheduled_time, message) VALUES (?, ?)", ((game_start - timedelta(minutes=10)).isoformat(),  f"Reminder: {dr.get_country(teamA)} vs {dr.get_country(teamB)} starts in 10 minutes!"))
+                                dg_cur.execute("INSERT INTO rugby_messages (scheduled_time, message) VALUES (?, ?)", (now.isoformat(), schedule_message))
+                                dg_conn.commit()
+        except Exception as e:
+            print(f"Error in schedule_rugby_matches: {e}")
+        await asyncio.sleep(1)
+
 async def activate_rugby_report(client):
     await client.wait_until_ready()
     while not client.is_closed():
         try:
-            filename = 'rugby_report.txt'
-            if os.path.isfile(filename):
-                with open(filename, 'r', encoding='utf-8') as f:
-                    TEXT = f.read()
-            
-                print("Processing rugby report")
-                conn = sqlite3.connect("DailyGamesPosts.db")
+            dr = DailyRugby()
+            messages = dr.handle_live_match()
+            with sqlite3.connect("DailyGamesPosts.db") as conn:
                 cur = conn.cursor()
-
-                print("Clearing all existing rugby messages from the queue.")
-                cur.execute('''CREATE TABLE IF NOT EXISTS rugby_messages (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    scheduled_time DATETIME NOT NULL,
-                    message TEXT NOT NULL)''')
-                cur.execute("DELETE FROM rugby_messages")
+                # Insert into database
+                for scheduled_time, message, query in messages:
+                    cur.execute("INSERT INTO rugby_messages (scheduled_time, message, query) VALUES (?, ?, ?)", (scheduled_time, message, query))
                 conn.commit()
-
-                now = datetime.now(UTC_TZ)
-                schedule_list = [(now,'','')] if re.match(r"Send initial schedule message: (.+)", TEXT.splitlines()[0])[1].lower() == "true" else []
-
-                include_messages_from_past = re.match(r"Include messages from past: (.+)", TEXT.splitlines()[1])[1].lower() == "true"
-                TEXT = "\n".join(TEXT.splitlines()[2:])
-
-                games = re.split(r"\n\s*\n(?=Game \d+)", TEXT.strip())
-                for game_number, game_text in enumerate(games):
-                    lines = [line.strip() for line in game_text.splitlines() if line.strip()]
-
-                    start_time = lines[1]
-                    game_start = datetime.strptime(start_time, "%d-%m-%Y %H:%M").replace(tzinfo=AMSTERDAM_TZ).astimezone(UTC_TZ)
-
-                    matchup = lines[2]
-                    m = re.match(r"(.+) will be playing against (.+)!", matchup)
-                    team_a = m.group(1)
-                    team_b = m.group(2)
-
-                    scheduled = []
-
-                    # Reminders
-                    scheduled.append((game_start - timedelta(hours=1, minutes=30), f"Reminder: {team_a} vs {team_b} starts in 1 hour and 30 minutes!"))
-                    scheduled.append((game_start - timedelta(minutes=45), f"Reminder: {team_a} vs {team_b} starts in 45 minutes!"))
-                    scheduled.append((game_start - timedelta(minutes=10), f"Reminder: {team_a} vs {team_b} starts in 10 minutes!"))
-
-                    # Kickoff
-                    scheduled.append((game_start, f"The game between {team_a} and {team_b} begins!"))
-                    if game_start > now:
-                        cur.execute("INSERT OR IGNORE INTO rugbymatches (matchname) VALUES (?)", (f"{team_a} vs {team_b}",))
-                        cur.execute("INSERT OR IGNORE INTO rugbymatchsubscriptions (matchname, userid) SELECT ?, userid FROM rugbymatchsubscriptions WHERE matchname = ? OR matchname = ?", (f"{team_a} vs {team_b}", team_a, team_b))
-
-                    halftime_minute = None
-                    final_score_line = None
-                    latest_event_time = game_start
-                    for line in lines[3:]:
-                        if line.startswith("Final score"):
-                            final_score_line = line
-                            latest_event_time = max(latest_event_time, game_start + timedelta(minutes=96))
-                            continue
-                        minute_match = re.match(r"(\d+)'", line)
-                        if not minute_match:
-                            second_match = re.match(r"\+(\d+) - (.*)", line)
-                            if second_match:
-                                second = int(second_match.group(1))
-                                message = second_match.group(2)
-                                scheduled.append((latest_event_time + timedelta(seconds=second), message))
-                            elif len(line) > 0:
-                                scheduled.append((latest_event_time + timedelta(seconds=20), line))
-                            continue
-                        minute = int(minute_match.group(1))
-                        if "Half-time" in line:
-                            halftime_minute = minute
-                            halftime_time = (game_start + timedelta(minutes=minute))
-                            scheduled.append((halftime_time, line))
-                            scheduled.append((halftime_time, "Second half starts in 15 minutes."))
-                            resume_time = halftime_time + timedelta(minutes=15)
-                            scheduled.append((resume_time, "The second half begins!"))
-                            latest_event_time = max(latest_event_time, resume_time)
-                            continue
-
-                        actual_time = (game_start + timedelta(minutes=minute))
-
-                        if halftime_minute is not None and minute > halftime_minute:
-                            actual_time += timedelta(minutes=15)  # Account for halftime break
-
-                        scheduled.append((actual_time, line))
-                        latest_event_time = max(latest_event_time,actual_time)
-
-                    # Final score 1 minute after last event
-                    if final_score_line:
-                        scheduled.append((game_start + timedelta(minutes=96), final_score_line))
-                        schedule_list.append((game_start + timedelta(minutes=96, seconds=20),final_score_line + "\n", f"{team_a} vs {team_b} at <t:{int(game_start.timestamp())}:f> (<t:{int(game_start.timestamp())}:R>)\n"))
-
-                    # Insert into database
-                    for scheduled_time, message in scheduled:
-                        if scheduled_time >= now or include_messages_from_past:
-                            cur.execute("INSERT INTO rugby_messages (scheduled_time, message) VALUES (?, ?)", (scheduled_time.isoformat(), message))
-
-                for i in range(len(schedule_list)):
-                    if schedule_list[i][0] >= now or include_messages_from_past:
-                        game_schedule = "These are the matches of this round:\n\n"
-                        game_schedule += "".join(schedule_list[j][1] for j in range(i+1))
-                        game_schedule += "".join(schedule_list[j][2] for j in range(i+1, len(schedule_list)))
-                        cur.execute("INSERT INTO rugby_messages (scheduled_time, message) VALUES (?, ?)", (schedule_list[i][0].isoformat(), game_schedule))
-
-                conn.commit()
-                conn.close()
-
-                print("Rugby report processed and scheduled messages stored in the database.")
-                os.remove(filename)
         except Exception as e:
             print(f"Error processing rugby report: {e}")
             thread = await client.fetch_channel(TEST_CHANNEL_ID)
             await thread.send(f"Error processing rugby report: {e}")
-        await asyncio.sleep(60)
+        await asyncio.sleep(1)
 
 async def send_rugby_message(client):
     await client.wait_until_ready()
     while not client.is_closed():
         try:
-            conn = sqlite3.connect("DailyGamesPosts.db")
-            cur = conn.cursor()
+            with sqlite3.connect("DailyGamesPosts.db") as conn:
+                cur = conn.cursor()
 
-            cur.execute("""
-            SELECT id, message
-            FROM rugby_messages
-            WHERE scheduled_time <= ?
-            ORDER BY scheduled_time
-            """, (datetime.now(UTC_TZ).isoformat(),))
+                cur.execute("""
+                SELECT id, message, query
+                FROM rugby_messages
+                WHERE scheduled_time <= ?
+                ORDER BY scheduled_time
+                """, (datetime.now(UTC_TZ).isoformat(),))
 
-            messages = cur.fetchall()
-            for message_id, message in messages:
-                print(f"Sending scheduled rugby message: {message}")
-                thread = await client.fetch_channel(DAILY_RUGBY_CHANNEL_ID)
+                messages = cur.fetchall()
+                for message_id, message, query in messages:
+                    thread = await client.fetch_channel(DAILY_RUGBY_CHANNEL_ID)
 
-                is_first_reminder = re.match(r"Reminder: (.+) vs (.+) starts in 1 hour and 30 minutes!", message)
-                is_game_start = re.match(r"The game between (.+) and (.+) begins!", message)
-                is_end_of_break = re.match(r"The second half begins!", message)
-                is_end_of_game = re.match(r"Final score", message)
-                if is_first_reminder:
-                    cur.execute("UPDATE currentmatch SET matchname = ?", (f"{is_first_reminder.group(1)} vs {is_first_reminder.group(2)}",))
-                currentmatch = cur.execute("SELECT matchname FROM currentmatch").fetchone()[0]
-                if is_first_reminder or is_game_start or is_end_of_break or is_end_of_game:
-                    cur.execute("SELECT userid FROM rugbymatchsubscriptions WHERE LOWER(matchname) = LOWER(?)", (currentmatch,))
-                    user_ids = [int(row[0]) for row in cur.fetchall()]
+                    is_first_reminder = re.match(r"Reminder: (.+) vs (.+) starts in 1 hour and 30 minutes!", message)
+                    is_game_start = re.match(r"The game between (.+) and (.+) starts in 1 minute!", message)
+                    is_end_of_break = re.match(r"The second half begins in 1 minute!", message)
+                    is_end_of_game = re.match(r"The match is over!", message)
+                    if is_first_reminder:
+                        cur.execute("UPDATE currentmatch SET matchname = ?", (f"{is_first_reminder.group(1)} vs {is_first_reminder.group(2)}",))
+                    if is_game_start:
+                        cur.execute("UPDATE currentmatch SET matchname = ?", (f"{is_game_start.group(1)} vs {is_game_start.group(2)}",))
+                    currentmatch = cur.execute("SELECT matchname FROM currentmatch").fetchone()[0]
+                    if is_first_reminder or is_game_start or is_end_of_break or is_end_of_game:
+                        cur.execute("SELECT userid FROM rugbymatchsubscriptions WHERE LOWER(matchname) = LOWER(?)", (currentmatch,))
+                        user_ids = [int(row[0]) for row in cur.fetchall()]
 
-                    if is_end_of_game:
-                        cur.execute("DELETE FROM rugbymatchsubscriptions WHERE LOWER(matchname) = LOWER(?)", (currentmatch,))
-                        cur.execute("DELETE FROM rugbymatches WHERE LOWER(matchname) = LOWER(?)", (currentmatch,))
+                        if is_end_of_game:
+                            cur.execute("DELETE FROM rugbymatchsubscriptions WHERE LOWER(matchname) = LOWER(?)", (currentmatch,))
+                            cur.execute("DELETE FROM rugbymatches WHERE LOWER(matchname) = LOWER(?)", (currentmatch,))
 
-                    tags = [f"<@{uid}>" for uid in user_ids]
-                    if len(tags) > 0:
-                        message += f"\nCircadians subscribed to this match: " + " ".join(tags)
+                        tags = [f"<@{uid}>" for uid in user_ids]
+                        if len(tags) > 0:
+                            message += f"\nCircadians subscribed to this match: " + " ".join(tags)
 
-                await thread.send(message)
-                cur.execute("DELETE FROM rugby_messages WHERE id = ?", (message_id,))
-                conn.commit()
-            conn.close()
+                    if len(message) != 0:
+                        await thread.send(message)
+                    with sqlite3.connect("rugby.db") as rugby_conn:
+                        rugby_cur = rugby_conn.cursor()
+                        rugby_cur.executescript(query)
+                        rugby_conn.commit()
+                    cur.execute("DELETE FROM rugby_messages WHERE id = ?", (message_id,))
+                    conn.commit()
+
+                cur.execute("""
+                SELECT id, message, query
+                FROM rugby_messages
+                WHERE scheduled_time <= ?
+                ORDER BY scheduled_time
+                """, (datetime.now(UTC_TZ).isoformat(),))
+
         except Exception as e:
             print(f"Error sending rugby messages: {e}")
-        await asyncio.sleep(10)
+        await asyncio.sleep(1)
 
 async def send_daily_date_message(client):
     await client.wait_until_ready()
@@ -686,6 +761,7 @@ client = MyClient(intents=intents)
 
 @client.event
 async def on_ready():
+    setup_database()
     print(f'Logged in as {client.user} (ID: {client.user.id})')
     print('Guilds the bot is in:')
     for guild in client.guilds:
