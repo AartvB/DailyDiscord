@@ -12,6 +12,16 @@ from zoneinfo import ZoneInfo
 import requests
 from icalendar import Calendar
 from dailyrugby import DailyRugby
+import psutil
+import tracemalloc
+import gc
+import sys
+
+restarting = False
+process = psutil.Process(os.getpid())
+tracemalloc.start()
+global old_snapshot
+old_snapshot = tracemalloc.take_snapshot()
 
 AMSTERDAM_TZ = ZoneInfo("Europe/Amsterdam")
 UTC_TZ = ZoneInfo("UTC")
@@ -24,6 +34,8 @@ BOT_DOMAIN_CHANNEL_ID = os.getenv('BOT_DOMAIN_CHANNEL_ID')
 DAILY_RUGBY_CHANNEL_ID = os.getenv('DAILY_RUGBY_CHANNEL_ID')
 DAILY_DATE_CHANNEL_ID = os.getenv('DAILY_DATE_CHANNEL_ID')
 TEST_CHANNEL_ID = os.getenv('TEST_CHANNEL_ID')
+REPORT_ACTIONS_CHANNEL_ID = os.getenv('REPORT_ACTIONS_CHANNEL_ID')
+REPORT_STATUS_CHANNEL_ID = os.getenv('REPORT_STATUS_CHANNEL_ID')
 ADVERTISEMENT_CHANNEL_ID = os.getenv('ADVERTISEMENT_CHANNEL_ID')
 ICAL_URL = os.getenv('ICAL_URL')
 
@@ -87,6 +99,7 @@ async def autocomplete_rugby_team(interaction: discord.Interaction, current: str
         countries.add(dr.cursor().fetchone()[0])
         dr.cursor().execute('SELECT country FROM teams WHERE username = ?', (match[1],))
         countries.add(dr.cursor().fetchone()[0])
+    del dr
     return [discord.app_commands.Choice(name=country, value=country) for country in sorted(list(countries)) if country.lower().startswith(current.lower())]
 
 async def autocomplete_cheer(interaction: discord.Interaction, current: str):
@@ -96,6 +109,7 @@ async def autocomplete_cheer(interaction: discord.Interaction, current: str):
             return []
         teamA, teamB = dr.cursor().execute("SELECT teamA, teamB FROM current_match_state").fetchone()
         countries = [dr.get_country(teamA), dr.get_country(teamB)]
+        del dr
         return [discord.app_commands.Choice(name=country, value=country) for country in countries if country.lower().startswith(current.lower())]
     except Exception as e:
         print(f"Error in autocomplete_cheer: {e}")
@@ -129,36 +143,48 @@ class MyClient(discord.Client):
     async def setup_hook(self):
         self.reddit = asyncpraw.Reddit('bot1')
         self.subreddit = await self.reddit.subreddit("dailygames")
+        
         self.bg_task = self.loop.create_task(background_task(self))
         self.txt_task = self.loop.create_task(process_txt_files(self))
         self.rugby_task = self.loop.create_task(activate_rugby_report(self))
         self.rugby_message_task = self.loop.create_task(send_rugby_message(self))
         self.date_task = self.loop.create_task(send_daily_date_message(self))
         self.rugby_schedule_task = self.loop.create_task(schedule_rugby_matches(self))
+        self.memory_check = self.loop.create_task(check_memory_status(self))
         self.tree = discord.app_commands.CommandTree(self)
+
+        async def interaction_check(interaction: discord.Interaction):
+            global restarting
+            print(f"Restarting: {restarting}")
+            if restarting:
+                await interaction.response.send_message("Bot is restarting due to memory issues. Please try again in a few seconds.", ephemeral=True)
+                return False
+            return True
+
+        self.tree.interaction_check = interaction_check
 
         @self.tree.command(name="subscribe", description="Subscribe to a DailyGame")
         @discord.app_commands.describe(text="The series to subscribe to")
         @discord.app_commands.autocomplete(text=autocomplete_subscribe)
         async def subscribe(interaction: discord.Interaction, text: str):
             try:
-                conn = sqlite3.connect("DailyGamesPosts.db")
-                cursor = conn.cursor()
-                cursor.execute("SELECT name FROM series")
-                series_rows = [row[0] for row in cursor.fetchall()]
-                series_map = {name.lower(): name for name in series_rows}
-                if text.lower() not in series_map:
-                    message = f"Series '{text}' not found. Available series: {', '.join(series_rows)}"
-                    if len(message) > 2000:
-                        message = message[:1997] + "..."
-                    await interaction.response.send_message(message, ephemeral=True)
-                    conn.close()
-                    return
-                actual_name = series_map[text.lower()]
-                cursor.execute("INSERT OR IGNORE INTO subscriptions (userid, seriesname, platform) VALUES (?, ?, 'discord')", (interaction.user.id, actual_name))
-                conn.commit()
-                conn.close()
-                await interaction.response.send_message(f"You have subscribed to '{text}'.", ephemeral=True)
+                with sqlite3.connect("DailyGamesPosts.db") as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT name FROM series")
+                    series_rows = [row[0] for row in cursor.fetchall()]
+                    series_map = {name.lower(): name for name in series_rows}
+                    if text.lower() not in series_map:
+                        message = f"Series '{text}' not found. Available series: {', '.join(series_rows)}"
+                        if len(message) > 2000:
+                            message = message[:1997] + "..."
+                        await interaction.response.send_message(message, ephemeral=True)
+                        return
+                    actual_name = series_map[text.lower()]
+                    cursor.execute("INSERT OR IGNORE INTO subscriptions (userid, seriesname, platform) VALUES (?, ?, 'discord')", (interaction.user.id, actual_name))
+                    conn.commit()
+                    await interaction.response.send_message(f"You have subscribed to '{text}'.", ephemeral=True)
+                    thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
+                    await thread.send(f"{interaction.user.name} subscribed to '{text}'.")
             except Exception as e:
                 print(f"Error in subscribe: {e}")
                 await interaction.response.send_message(f"An error occurred while subscribing: {e}.", ephemeral=True)
@@ -169,19 +195,19 @@ class MyClient(discord.Client):
         async def unsubscribe(interaction: discord.Interaction, text: str):
             user_id = interaction.user.id
             try:
-                conn = sqlite3.connect("DailyGamesPosts.db")
-                cursor = conn.cursor()
-                cursor.execute("SELECT seriesname FROM subscriptions WHERE userid = ? AND platform = 'discord'", (user_id,))
-                subs = [row[0] for row in cursor.fetchall()]
-                matching = next((s for s in subs if s.lower() == text.lower()), None)
-                if not matching:
-                    await interaction.response.send_message(f"You are not subscribed to '{text}'.", ephemeral=True)
-                    conn.close()
-                else:
-                    cursor.execute("DELETE FROM subscriptions WHERE userid = ? AND LOWER(seriesname) = LOWER(?) AND platform = 'discord'", (user_id, text))
-                    conn.commit()
-                    conn.close()
-                    await interaction.response.send_message(f"You have unsubscribed from '{text}'.", ephemeral=True)
+                with sqlite3.connect("DailyGamesPosts.db") as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT seriesname FROM subscriptions WHERE userid = ? AND platform = 'discord'", (user_id,))
+                    subs = [row[0] for row in cursor.fetchall()]
+                    matching = next((s for s in subs if s.lower() == text.lower()), None)
+                    if not matching:
+                        await interaction.response.send_message(f"You are not subscribed to '{text}'.", ephemeral=True)
+                    else:
+                        cursor.execute("DELETE FROM subscriptions WHERE userid = ? AND LOWER(seriesname) = LOWER(?) AND platform = 'discord'", (user_id, text))
+                        conn.commit()
+                        await interaction.response.send_message(f"You have unsubscribed from '{text}'.", ephemeral=True)
+                        thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
+                        await thread.send(f"{interaction.user.name} unsubscribed from '{text}'.")
             except Exception as e:
                 print(f"Error in unsubscribe: {e}")
                 await interaction.response.send_message(f"An error occurred while unsubscribing: {e}.", ephemeral=True)
@@ -190,15 +216,16 @@ class MyClient(discord.Client):
         async def viewSubscriptions(interaction: discord.Interaction):
             user_id = interaction.user.id
             try:
-                conn = sqlite3.connect("DailyGamesPosts.db")
-                cursor = conn.cursor()
-                cursor.execute("SELECT seriesname FROM subscriptions WHERE userid = ? AND platform = 'discord'", (user_id,))
-                subscriptions = [row[0] for row in cursor.fetchall()]
-                conn.close()
-                if subscriptions:
-                    await interaction.response.send_message(f"You are subscribed to: {', '.join(subscriptions)}", ephemeral=True)
-                else:
-                    await interaction.response.send_message("You are not subscribed to any series.", ephemeral=True)
+                with sqlite3.connect("DailyGamesPosts.db") as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT seriesname FROM subscriptions WHERE userid = ? AND platform = 'discord'", (user_id,))
+                    subscriptions = [row[0] for row in cursor.fetchall()]
+                    if subscriptions:
+                        await interaction.response.send_message(f"You are subscribed to: {', '.join(subscriptions)}", ephemeral=True)
+                    else:
+                        await interaction.response.send_message("You are not subscribed to any series.", ephemeral=True)
+                    thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
+                    await thread.send(f"{interaction.user.name} viewed their subscriptions.")
             except Exception as e:
                 print(f"Error in viewSubscriptions: {e}")
                 await interaction.response.send_message(f"An error occurred while viewing subscriptions: {e}.", ephemeral=True)
@@ -208,27 +235,25 @@ class MyClient(discord.Client):
         @discord.app_commands.autocomplete(text=autocomplete_subscribe_rugby_matches)
         async def rugbysubscribe(interaction: discord.Interaction, text: str):
             try:
-                conn = sqlite3.connect("DailyGamesPosts.db")
-                cursor = conn.cursor()
-                cursor.execute("SELECT matchname FROM rugbymatches")
-                match_rows = [row[0] for row in cursor.fetchall()]
-                match_map = {name.lower(): name for name in match_rows}
-                if text.lower() not in match_map:
-                    conn2 = sqlite3.connect("rugby.db")
-                    cursor2 = conn2.cursor()
-                    cursor2.execute("SELECT country from teams")
-                    match_rows = [row[0] for row in cursor2.fetchall()]
-                    match_map = {name.lower(): name for name in match_rows}
-                    conn2.close()
+                with sqlite3.connect("DailyGamesPosts.db") as conn, sqlite3.connect("rugby.db") as conn2:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT matchname FROM rugbymatches")
+                    match_rows1 = [row[0] for row in cursor.fetchall()]
+                    match_map = {name.lower(): name for name in match_rows1}
                     if text.lower() not in match_map:
-                        await interaction.response.send_message(f"Match or team '{text}' not found. Available matches: {', '.join(match_rows)}", ephemeral=True)
-                        conn.close()
-                        return
-                    cursor.execute("INSERT OR IGNORE INTO rugbymatchsubscriptions (userid, matchname) SELECT ?, matchname FROM rugbymatches WHERE matchname LIKE ?", (interaction.user.id, f"%{match_map[text.lower()]}%"))
-                cursor.execute("INSERT OR IGNORE INTO rugbymatchsubscriptions (userid, matchname) VALUES (?, ?)", (interaction.user.id, match_map[text.lower()]))
-                conn.commit()
-                conn.close()
-                await interaction.response.send_message(f"You have subscribed to '{text}'.", ephemeral=True)
+                        cursor2 = conn2.cursor()
+                        cursor2.execute("SELECT country from teams")
+                        match_rows2 = [row[0] for row in cursor2.fetchall()]
+                        match_map = {name.lower(): name for name in match_rows2}
+                        if text.lower() not in match_map:
+                            await interaction.response.send_message(f"Match or team '{text}' not found. Available matches: {', '.join(match_rows1 + match_rows2)}", ephemeral=True)
+                            return
+                        cursor.execute("INSERT OR IGNORE INTO rugbymatchsubscriptions (userid, matchname) SELECT ?, matchname FROM rugbymatches WHERE matchname LIKE ?", (interaction.user.id, f"%{match_map[text.lower()]}%"))
+                    cursor.execute("INSERT OR IGNORE INTO rugbymatchsubscriptions (userid, matchname) VALUES (?, ?)", (interaction.user.id, match_map[text.lower()]))
+                    conn.commit()
+                    await interaction.response.send_message(f"You have subscribed to '{text}'.", ephemeral=True)
+                    thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
+                    await thread.send(f"{interaction.user.name} subscribed to '{text}'.")
             except Exception as e:
                 print(f"Error in rugbysubscribe: {e}")
                 await interaction.response.send_message(f"An error occurred while subscribing: {e}.", ephemeral=True)
@@ -239,19 +264,19 @@ class MyClient(discord.Client):
         async def rugbyunsubscribe(interaction: discord.Interaction, text: str):
             try:
                 user_id = interaction.user.id
-                conn = sqlite3.connect("DailyGamesPosts.db")
-                cursor = conn.cursor()
-                cursor.execute("SELECT matchname FROM rugbymatchsubscriptions WHERE userid = ?", (user_id,))
-                subs = [row[0] for row in cursor.fetchall()]                    
-                matching = next((s for s in subs if s.lower() == text.lower()), None)
-                if not matching:
-                    await interaction.response.send_message(f"You are not subscribed to '{text}'.", ephemeral=True)
-                    conn.close()
-                else:
-                    cursor.execute("DELETE FROM rugbymatchsubscriptions WHERE userid = ? AND LOWER(matchname) = LOWER(?)", (user_id, text))
-                    conn.commit()
-                    conn.close()
-                    await interaction.response.send_message(f"You have unsubscribed from '{text}'.", ephemeral=True)
+                with sqlite3.connect("DailyGamesPosts.db") as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT matchname FROM rugbymatchsubscriptions WHERE userid = ?", (user_id,))
+                    subs = [row[0] for row in cursor.fetchall()]                    
+                    matching = next((s for s in subs if s.lower() == text.lower()), None)
+                    if not matching:
+                        await interaction.response.send_message(f"You are not subscribed to '{text}'.", ephemeral=True)
+                    else:
+                        cursor.execute("DELETE FROM rugbymatchsubscriptions WHERE userid = ? AND LOWER(matchname) = LOWER(?)", (user_id, text))
+                        conn.commit()
+                        await interaction.response.send_message(f"You have unsubscribed from '{text}'.", ephemeral=True)
+                        thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
+                        await thread.send(f"{interaction.user.name} unsubscribed from '{text}'.")
             except Exception as e:
                 print(f"Error in rugbyunsubscribe: {e}")
                 await interaction.response.send_message(f"An error occurred while unsubscribing: {e}.", ephemeral=True)
@@ -281,6 +306,9 @@ class MyClient(discord.Client):
                     await interaction.response.send_message(dr.get_player_description_long(team, number), ephemeral=private)
                 else:
                     await interaction.response.send_message(dr.get_team_description(team, probabilities), ephemeral=private)
+                thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
+                await thread.send(f"{interaction.user.name} requested the description for {team} (player number: {number if number else 'N/A'}, probabilities: {'Yes' if probabilities else 'No'}).")
+                del dr
             except Exception as e:
                 print(f"Error in getrugbydescription: {e}")
                 await interaction.response.send_message(f"An error occurred while fetching the description: {e}.", ephemeral=True)
@@ -292,7 +320,7 @@ class MyClient(discord.Client):
         async def cheer(interaction: discord.Interaction, team: str, yell: str = None):
             try:
                 dr = DailyRugby()
-                if not dr.match_is_ongoing():
+                if not dr.match_is_ongoing() or dr.cursor().execute("SELECT last_minute FROM current_match_state").fetchone()[0] == 79:
                     await interaction.response.send_message("There is no ongoing match to cheer for.", ephemeral=True)
                     return
 
@@ -313,19 +341,23 @@ class MyClient(discord.Client):
                     return
                 
                 number_of_cheers = dr.cursor().execute("SELECT COUNT(uses_left) FROM cheers WHERE user_id = ?", (user_id,)).fetchone()[0]
-                if number_of_cheers >= 3:
-                    await interaction.response.send_message("You have already cheered 3 times, you can only cheer 3 times per match.", ephemeral=True)
+                bonus_cheers = ('supporter' in [s[0] for s in dr.cursor().execute('SELECT specialist FROM specialists WHERE discord_user_id = ?', (user_id,)).fetchall()]) * 3
+                if number_of_cheers >= 3 + bonus_cheers:
+                    await interaction.response.send_message(f"You have already cheered {3 + bonus_cheers} times, you can only cheer {3 + bonus_cheers} times per match.", ephemeral=True)
                     return
 
                 username = dr.get_username(team)
                 dr.cursor().execute("INSERT INTO cheers (user_id, minute, uses_left, team, yell) VALUES (?, ?, 2, ?, ?)", (user_id, next_minute, username, yell))
                 dr.conn().commit()
-                await interaction.response.send_message(f"Your cheer for {team} has been scheduled!", ephemeral=True)
+                await interaction.response.send_message(f"Your cheer for {team} has been scheduled! You have {3 + bonus_cheers - number_of_cheers - 1} cheers left.", ephemeral=True)
+                thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
+                await thread.send(f"{interaction.user.name} cheered for {team}!")
+                del dr
             except Exception as e:
                 print(f"Error in cheer: {e}")
                 await interaction.response.send_message(f"An error occurred while cheering: {e}.", ephemeral=True)
 
-        @self.tree.command(name="getrugbyodds", description="Get the odds for a rugby team to win")
+        @self.tree.command(name="getrugbyodds", description="Get the probability for a rugby team to win")
         @discord.app_commands.describe(team="The team to get odds for")
         @discord.app_commands.describe(tactic="The tactic to consider")
         @discord.app_commands.describe(opponent_tactic="The tactic of the opponent")
@@ -348,6 +380,9 @@ class MyClient(discord.Client):
                     await interaction.response.send_message("The match outcomes have not been calculated yet. Please try again later.", ephemeral=True)
                     return
                 current_round = dr.get_next_round()
+                if current_round < 6 and (cake or opponent_cake):
+                    await interaction.response.send_message("There are no teams with cakes during this round.", ephemeral=True)
+                    return
                 username = dr.get_username(team)
                 opponent = dr.cursor().execute("SELECT teamB FROM planned_matches WHERE teamA = ? AND round = ? UNION SELECT teamA FROM planned_matches WHERE teamB = ? AND round = ?", (username, current_round, username, current_round)).fetchone()
                 if not opponent:
@@ -364,8 +399,11 @@ class MyClient(discord.Client):
                 if decimals < 0 or decimals > 10:
                     await interaction.response.send_message("The number of decimals must be an integer between 0 and 10.", ephemeral=True)
                     return
-                await interaction.response.send_message(f"The odds for {team} (using {tactic_str}{cake_str}) to win against {opponent} (using {opponent_tactic_str}{opponent_cake_str}) are: {result:.{decimals}f}", ephemeral=private)
-
+                await interaction.response.send_message(f"The probability of {team} (using {tactic_str}{cake_str}) to win against {opponent} (using {opponent_tactic_str}{opponent_cake_str}) is: {result*100:.{decimals}f}%", ephemeral=private)
+                if private:
+                    thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
+                    await thread.send(f"{interaction.user.name} requested the odds for {team} (using {tactic_str}{cake_str}) to win against {opponent} (using {opponent_tactic_str}{opponent_cake_str}).")
+                del dr
             except Exception as e:
                 print(f"Error in getrugbyodds: {e}")
                 await interaction.response.send_message(f"An error occurred while fetching the odds: {e}.", ephemeral=True)
@@ -375,19 +413,20 @@ class MyClient(discord.Client):
         @discord.app_commands.checks.has_role('Human Overlord')
         async def addSeries(interaction: discord.Interaction, text: str):
             try:
-                conn = sqlite3.connect("DailyGamesPosts.db")
-                cursor = conn.cursor()
-                cursor.execute("SELECT name FROM series WHERE LOWER(name) = LOWER(?)", (text,))
-                existing = cursor.fetchone()
-                if existing:
-                    await interaction.response.send_message(f"Series '{text}' already exists as '{existing[0]}'.", ephemeral=True)
-                else:
-                    cursor.execute("INSERT INTO series (name) VALUES (?)", (text,))
-                    conn.commit()
-                    await interaction.response.send_message(f"Users can now subscribe to series '{text}'.", ephemeral=True)
-                    thread = await client.fetch_channel(NEW_POST_CHANNEL_ID)
-                    await thread.send(f"It is now possible to subscribe to the series named {text}!")
-                conn.close()
+                with sqlite3.connect("DailyGamesPosts.db") as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT name FROM series WHERE LOWER(name) = LOWER(?)", (text,))
+                    existing = cursor.fetchone()
+                    if existing:
+                        await interaction.response.send_message(f"Series '{text}' already exists as '{existing[0]}'.", ephemeral=True)
+                    else:
+                        cursor.execute("INSERT INTO series (name) VALUES (?)", (text,))
+                        conn.commit()
+                        await interaction.response.send_message(f"Users can now subscribe to series '{text}'.", ephemeral=True)
+                        thread = await client.fetch_channel(NEW_POST_CHANNEL_ID)
+                        await thread.send(f"It is now possible to subscribe to the series named {text}!")
+                    thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
+                    await thread.send(f"{interaction.user.name} added a new series: '{text}'.")
             except Exception as e:
                 print(f"Error in addSeries: {e}")
                 await interaction.response.send_message(f"An error occurred while adding the series: {e}.", ephemeral=True)
@@ -398,30 +437,31 @@ class MyClient(discord.Client):
         @discord.app_commands.checks.has_role('Human Overlord')
         async def renameSeries(interaction: discord.Interaction, old_name: str, new_name: str):
             try:
-                conn = sqlite3.connect("DailyGamesPosts.db")
-                cursor = conn.cursor()
-                cursor.execute("SELECT name FROM series WHERE LOWER(name) = LOWER(?)", (old_name,))
-                old_row = cursor.fetchone()
-                old_exists = old_row is not None
-                if old_row:
-                    old_name = old_row[0]
-                if not old_exists:
-                    await interaction.response.send_message(f"Series '{old_name}' not found.", ephemeral=True)
-                else:
-                    cursor.execute("SELECT name FROM series WHERE LOWER(name) = LOWER(?)", (new_name,))
-                    new_row = cursor.fetchone()
-                    new_exists = new_row is not None
-                    if new_exists and (new_row[0].lower() != old_name.lower()):
-                        await interaction.response.send_message(f"Series '{new_name}' already exists.", ephemeral=True)
+                with sqlite3.connect("DailyGamesPosts.db") as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT name FROM series WHERE LOWER(name) = LOWER(?)", (old_name,))
+                    old_row = cursor.fetchone()
+                    old_exists = old_row is not None
+                    if old_row:
+                        old_name = old_row[0]
+                    if not old_exists:
+                        await interaction.response.send_message(f"Series '{old_name}' not found.", ephemeral=True)
                     else:
-                        cursor.execute("UPDATE series SET name = ? WHERE LOWER(name) = LOWER(?)", (new_name, old_name))
-                        cursor.execute("UPDATE subscriptions SET seriesname = ? WHERE LOWER(seriesname) = LOWER(?)", (new_name, old_name))
-                        cursor.execute("UPDATE posts SET seriesname = ? WHERE LOWER(seriesname) = LOWER(?)", (new_name, old_name))
-                        conn.commit()
-                        await interaction.response.send_message(f"You renamed Series '{old_name}' to '{new_name}'.", ephemeral=True)
-                        thread = await client.fetch_channel(NEW_POST_CHANNEL_ID)
-                        await thread.send(f"The series '{old_name}' has been renamed to '{new_name}'.")
-                conn.close()
+                        cursor.execute("SELECT name FROM series WHERE LOWER(name) = LOWER(?)", (new_name,))
+                        new_row = cursor.fetchone()
+                        new_exists = new_row is not None
+                        if new_exists and (new_row[0].lower() != old_name.lower()):
+                            await interaction.response.send_message(f"Series '{new_name}' already exists.", ephemeral=True)
+                        else:
+                            cursor.execute("UPDATE series SET name = ? WHERE LOWER(name) = LOWER(?)", (new_name, old_name))
+                            cursor.execute("UPDATE subscriptions SET seriesname = ? WHERE LOWER(seriesname) = LOWER(?)", (new_name, old_name))
+                            cursor.execute("UPDATE posts SET seriesname = ? WHERE LOWER(seriesname) = LOWER(?)", (new_name, old_name))
+                            conn.commit()
+                            await interaction.response.send_message(f"You renamed Series '{old_name}' to '{new_name}'.", ephemeral=True)
+                            thread = await client.fetch_channel(NEW_POST_CHANNEL_ID)
+                            await thread.send(f"The series '{old_name}' has been renamed to '{new_name}'.")
+                            thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
+                            await thread.send(f"{interaction.user.name} renamed series '{old_name}' to '{new_name}'.")
             except Exception as e:
                 print(f"Error in renameSeries: {e}")
                 await interaction.response.send_message(f"An error occurred while renaming the series: {e}.", ephemeral=True)
@@ -438,40 +478,41 @@ class MyClient(discord.Client):
             postid = match.group(1)
 
             try:
-                conn = sqlite3.connect("DailyGamesPosts.db")
-                cursor = conn.cursor()
-                cursor.execute("SELECT 1 FROM posts WHERE id = ?", (postid,))
-                post_exists = cursor.fetchone()
-                cursor.execute("SELECT name FROM series WHERE LOWER(name) = LOWER(?)", (series_name,))
-                series_row = cursor.fetchone()
-                series_exists = series_row is not None
-                if series_row:
-                    series_name = series_row[0]
-                if post_exists and series_exists:
-                    cursor.execute("UPDATE posts SET seriesname = ? WHERE id = ?",(series_name, postid))
-                    conn.commit()
-                    await interaction.response.send_message(f"Post '{postid}' assigned to series '{series_name}'.", ephemeral=True)
+                with sqlite3.connect("DailyGamesPosts.db") as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT 1 FROM posts WHERE id = ?", (postid,))
+                    post_exists = cursor.fetchone()
+                    cursor.execute("SELECT name FROM series WHERE LOWER(name) = LOWER(?)", (series_name,))
+                    series_row = cursor.fetchone()
+                    series_exists = series_row is not None
+                    if series_row:
+                        series_name = series_row[0]
+                    if post_exists and series_exists:
+                        cursor.execute("UPDATE posts SET seriesname = ? WHERE id = ?",(series_name, postid))
+                        conn.commit()
+                        await interaction.response.send_message(f"Post '{postid}' assigned to series '{series_name}'.", ephemeral=True)
 
-                    cursor.execute("SELECT userid FROM subscriptions WHERE LOWER(seriesname) = LOWER(?) AND platform = 'discord'", (series_name,))
-                    user_ids = [int(row[0]) for row in cursor.fetchall()]
-                    if (len(user_ids) > 0):
-                        thread = await client.fetch_channel(NEW_POST_CHANNEL_ID)
-                        # Find the original bot message about this post
-                        async for msg in thread.history(limit=50):
-                            if postid in msg.content and msg.author == client.user:
-                                tags = [f"<@{uid}>" for uid in user_ids]
-                                reply = f"I first did not (correctly) recognize the series of this post, but I do recognize it now.\nIt is part of the series named {series_name}."
-                                if len(tags) > 0:
-                                    reply += f"\nCircadians subscribed to this series: " + " ".join(tags)
-                                await msg.reply(reply)
-                                break
-                else:
-                    if not post_exists:
-                        await interaction.response.send_message(f"Post with ID '{postid}' not found in the database.", ephemeral=True)
-                    if not series_exists:
-                        await interaction.response.send_message(f"Series '{series_name}' not found.", ephemeral=True)
-                conn.commit()
-                conn.close()
+                        cursor.execute("SELECT userid FROM subscriptions WHERE LOWER(seriesname) = LOWER(?) AND platform = 'discord'", (series_name,))
+                        user_ids = [int(row[0]) for row in cursor.fetchall()]
+                        if (len(user_ids) > 0):
+                            thread = await client.fetch_channel(NEW_POST_CHANNEL_ID)
+                            # Find the original bot message about this post
+                            async for msg in thread.history(limit=50):
+                                if postid in msg.content and msg.author == client.user:
+                                    tags = [f"<@{uid}>" for uid in user_ids]
+                                    reply = f"I first did not (correctly) recognize the series of this post, but I do recognize it now.\nIt is part of the series named {series_name}."
+                                    if len(tags) > 0:
+                                        reply += f"\nCircadians subscribed to this series: " + " ".join(tags)
+                                    await msg.reply(reply)
+                                    break
+                    else:
+                        if not post_exists:
+                            await interaction.response.send_message(f"Post with ID '{postid}' not found in the database.", ephemeral=True)
+                        if not series_exists:
+                            await interaction.response.send_message(f"Series '{series_name}' not found.", ephemeral=True)
+                    conn.commit()
+                    thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
+                    await thread.send(f"{interaction.user.name} added post '{postid}' to series '{series_name}'.")
             except Exception as e:
                 print(f"Error in addposttoseries: {e}")
                 await interaction.response.send_message(f"An error occurred while adding the post to the series: {e}.", ephemeral=True)
@@ -499,6 +540,8 @@ class MyClient(discord.Client):
                     return
                 await message.delete()
                 await interaction.response.send_message("Message deleted successfully.", ephemeral=True)
+                thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
+                await thread.send(f"{interaction.user.name} deleted a bot message: {message.content}.")
             except Exception as e:
                 await interaction.response.send_message(f"Error deleting message: {e}", ephemeral=True)
         
@@ -529,46 +572,46 @@ class MyClient(discord.Client):
                 thread = await self.fetch_channel(ADVERTISEMENT_CHANNEL_ID)
                 await thread.send(f"A new advertisement was posted on r/dailygames. It has been {int(days)} days, {int(hours)} hours, {int(minutes)} minutes, and {int(seconds)} seconds since the last one.")
                 await interaction.response.send_message(f"Thank you for reporting the advertisement. I have recorded it and notified the appropriate channel.", ephemeral=True)
+                thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
+                await thread.send(f"{interaction.user.name} reported a new advertisement: {post_link}.")
             except Exception as e:
                 print(f"Error in detectad: {e}")
                 await interaction.response.send_message(f"An error occurred while processing the advertisement: {e}.", ephemeral=True)
-
-async def doLinkCheck(client):
-    conn = sqlite3.connect("DailyGamesPosts.db")
-    cursor = conn.cursor()
-    posts = []
-    async for post in client.subreddit.new(limit=20):
-        posts.append(post)
-    for post in reversed(posts):
-        cursor.execute("SELECT COUNT(*) FROM posts WHERE id = ?", (post.id,))
-        linked_to_post = cursor.fetchone()[0] > 0
-        if not linked_to_post and int(post.created_utc) < int(time.time()) - 5*60:
-            message = 'u/{author} has created a new post called "{title}". You can find it here: https://www.reddit.com/r/dailygames/comments/{id}/'.format(author=post.author.name.translate(str.maketrans({'_':  r'\_', '*':  r'\*', '~':  r'\~'})) if post.author else '[deleted]',title=post.title.translate(str.maketrans({'_':  r'\_', '*':  r'\*', '~':  r'\~'})),id=post.id)
-
-            # Detect series
-            cursor.execute("SELECT name FROM series")
-            series_names = [row[0] for row in cursor.fetchall()]
-            matched_series = [series_name for series_name in series_names if series_name.lower() in post.title.lower()]
-            if (len(matched_series) == 0 or len(matched_series) > 1):
-                cursor.execute("INSERT INTO posts (id) VALUES (?)", (post.id,))
-            else:
-                message += f"\nI think it is part of the series named {matched_series[0]}."
-                cursor.execute("INSERT INTO posts (id, seriesname) VALUES (?, ?)", (post.id,matched_series[0]))
-                cursor.execute("SELECT userid FROM subscriptions WHERE LOWER(seriesname) = LOWER(?) AND platform = 'discord'", (matched_series[0],))
-                user_ids = [int(row[0]) for row in cursor.fetchall()]
-                tags = [f"<@{uid}>" for uid in user_ids]
-                if len(tags) > 0:
-                    message += f"\nCircadians subscribed to this DailyGame: " + " ".join(tags)
-            conn.commit()
-            thread = await client.fetch_channel(NEW_POST_CHANNEL_ID)
-            await thread.send(message)
-    conn.close()
 
 async def background_task(client):
     await client.wait_until_ready()
     while not client.is_closed():
         try:
-            await doLinkCheck(client)
+            global restarting
+            if not restarting:
+                with sqlite3.connect("DailyGamesPosts.db") as conn:
+                    cursor = conn.cursor()
+                    posts = []
+                    async for post in client.subreddit.new(limit=20):
+                        posts.append(post)
+                    for post in reversed(posts):
+                        cursor.execute("SELECT COUNT(*) FROM posts WHERE id = ?", (post.id,))
+                        linked_to_post = cursor.fetchone()[0] > 0
+                        if not linked_to_post and int(post.created_utc) < int(time.time()) - 5*60:
+                            message = 'u/{author} has created a new post called "{title}". You can find it here: https://www.reddit.com/r/dailygames/comments/{id}/'.format(author=post.author.name.translate(str.maketrans({'_':  r'\_', '*':  r'\*', '~':  r'\~'})) if post.author else '[deleted]',title=post.title.translate(str.maketrans({'_':  r'\_', '*':  r'\*', '~':  r'\~'})),id=post.id)
+        
+                            # Detect series
+                            cursor.execute("SELECT name FROM series")
+                            series_names = [row[0] for row in cursor.fetchall()]
+                            matched_series = [series_name for series_name in series_names if series_name.lower() in post.title.lower()]
+                            if (len(matched_series) == 0 or len(matched_series) > 1):
+                                cursor.execute("INSERT INTO posts (id) VALUES (?)", (post.id,))
+                            else:
+                                message += f"\nI think it is part of the series named {matched_series[0]}."
+                                cursor.execute("INSERT INTO posts (id, seriesname) VALUES (?, ?)", (post.id,matched_series[0]))
+                                cursor.execute("SELECT userid FROM subscriptions WHERE LOWER(seriesname) = LOWER(?) AND platform = 'discord'", (matched_series[0],))
+                                user_ids = [int(row[0]) for row in cursor.fetchall()]
+                                tags = [f"<@{uid}>" for uid in user_ids]
+                                if len(tags) > 0:
+                                    message += f"\nCircadians subscribed to this DailyGame: " + " ".join(tags)
+                            conn.commit()
+                            thread = await client.fetch_channel(NEW_POST_CHANNEL_ID)
+                            await thread.send(message)
         except Exception as e:
             print(f"Error in background_task: {e}")
         await asyncio.sleep(60)
@@ -577,16 +620,18 @@ async def process_txt_files(client):
     await client.wait_until_ready()
     while not client.is_closed():
         try:
-            filename = 'bot_domain_message.txt'
-            if os.path.isfile(filename):
-                with open(filename, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                print(f"About to send message to #bot-domain:\n{content}")
-                thread = await client.fetch_channel(BOT_DOMAIN_CHANNEL_ID)
-                # Discord messages have a 2000 character limit
-                for chunk in [content[i:i+2000] for i in range(0, len(content), 2000)]:
-                    await thread.send(chunk)
-                os.remove(filename)
+            global restarting
+            if not restarting:
+                filename = 'bot_domain_message.txt'
+                if os.path.isfile(filename):
+                    with open(filename, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                    print(f"About to send message to #bot-domain:\n{content}")
+                    thread = await client.fetch_channel(BOT_DOMAIN_CHANNEL_ID)
+                    # Discord messages have a 2000 character limit
+                    for chunk in [content[i:i+2000] for i in range(0, len(content), 2000)]:
+                        await thread.send(chunk)
+                    os.remove(filename)
         except Exception as e:
             print(f"Error processing bot_domain_message file: {e}")
         await asyncio.sleep(10)
@@ -595,70 +640,112 @@ async def schedule_rugby_matches(client):
     await client.wait_until_ready()
     while not client.is_closed():
         try:
-            dr = DailyRugby()
-            if not dr.match_is_ongoing():
-                with sqlite3.connect("DailyGamesPosts.db") as dg_conn, sqlite3.connect("rugby.db") as rugby_conn:
-                    dg_cur = dg_conn.cursor()
-                    rugby_cur = rugby_conn.cursor()
+            global restarting
+            if not restarting:
+                dr = DailyRugby()
+                if not dr.match_is_ongoing():
+                    with sqlite3.connect("DailyGamesPosts.db") as dg_conn, sqlite3.connect("rugby.db") as rugby_conn:
+                        dg_cur = dg_conn.cursor()
+                        rugby_cur = rugby_conn.cursor()
 
-                    stored_matches = dg_cur.execute("SELECT matchname, timestamp FROM rugbymatches").fetchall()
-                    scheduled_matches = rugby_cur.execute("SELECT teamA, teamB, timestamp, round FROM scheduled_matches ORDER BY timestamp ASC").fetchall()
+                        stored_matches = dg_cur.execute("SELECT matchname, timestamp FROM rugbymatches").fetchall()
+                        scheduled_matches = rugby_cur.execute("SELECT teamA, teamB, timestamp, round FROM scheduled_matches ORDER BY timestamp ASC").fetchall()
 
-                    now = datetime.now(UTC_TZ)
-                    if len(scheduled_matches) > 0:
-                        current_round = scheduled_matches[0][3]
-                        if dr.all_matches_scheduled():
-                            updated = False
-                            for teamA, teamB, timestamp, _ in scheduled_matches:
-                                match_name = f"{dr.get_country(teamA)} vs {dr.get_country(teamB)}"
-                                if ((match_name, timestamp) not in stored_matches) and (timestamp > now.timestamp()):
-                                    print(f"Updating rugby matches: {match_name} at {timestamp}")
-                                    dg_cur.execute("INSERT OR REPLACE INTO rugbymatches (matchname, timestamp) VALUES (?, ?)", (match_name, timestamp))
-                                    updated = True
-
-                            if updated:
-                                print("Rugby matches updated in DailyGamesPosts.db")
-                                dg_cur.execute("DELETE FROM rugby_messages")
-                                dg_conn.commit()
-                                played_matches = rugby_cur.execute("SELECT teamA, teamB, teamA_points, teamB_points FROM matches WHERE round = ?", (current_round,)).fetchall()
-                                schedule_message = "These are the matches of this round:\n"
-
-                                played_lookup = {(pm[0], pm[1]): (pm[2], pm[3]) for pm in played_matches}
+                        now = datetime.now(UTC_TZ)
+                        if len(scheduled_matches) > 0:
+                            current_round = scheduled_matches[0][3]
+                            if dr.all_matches_scheduled():
+                                updated = False
                                 for teamA, teamB, timestamp, _ in scheduled_matches:
-                                    if (teamA, teamB) in played_lookup:
-                                        teamA_points, teamB_points = played_lookup[(teamA, teamB)]
-                                        schedule_message += f"\nFinal Score: {dr.get_country(teamA)} {teamA_points} - {teamB_points} {dr.get_country(teamB)}"
-                                    else:
-                                        schedule_message += f"\n{dr.get_country(teamA)} vs {dr.get_country(teamB)} at <t:{timestamp}:f> (<t:{timestamp}:R>)"
+                                    match_name = f"{dr.get_country(teamA)} vs {dr.get_country(teamB)}"
+                                    if ((match_name, timestamp) not in stored_matches) and (timestamp > now.timestamp()):
+                                        print(f"Updating rugby matches: {match_name} at {timestamp}")
+                                        dg_cur.execute("INSERT OR REPLACE INTO rugbymatches (matchname, timestamp) VALUES (?, ?)", (match_name, timestamp))
+                                        updated = True
 
-                                        game_start = datetime.fromtimestamp(timestamp, tz=UTC_TZ)
-                                        if game_start - timedelta(hours=1, minutes=30) > now:
-                                            dg_cur.execute("INSERT INTO rugby_messages (scheduled_time, message) VALUES (?, ?)", ((game_start - timedelta(hours=1, minutes=30)).isoformat(),  f"Reminder: {dr.get_country(teamA)} vs {dr.get_country(teamB)} starts in 1 hour and 30 minutes!"))
-                                        if game_start - timedelta(minutes=45) > now:
-                                            dg_cur.execute("INSERT INTO rugby_messages (scheduled_time, message) VALUES (?, ?)", ((game_start - timedelta(minutes=45)).isoformat(),  f"Reminder: {dr.get_country(teamA)} vs {dr.get_country(teamB)} starts in 45 minutes!"))
-                                        if game_start - timedelta(minutes=10) > now:
-                                            dg_cur.execute("INSERT INTO rugby_messages (scheduled_time, message) VALUES (?, ?)", ((game_start - timedelta(minutes=10)).isoformat(),  f"Reminder: {dr.get_country(teamA)} vs {dr.get_country(teamB)} starts in 10 minutes!"))
-                                dg_cur.execute("INSERT INTO rugby_messages (scheduled_time, message) VALUES (?, ?)", (now.isoformat(), schedule_message))
-                                dg_conn.commit()
+                                if updated:
+                                    print("Rugby matches updated in DailyGamesPosts.db")
+                                    dg_cur.execute("DELETE FROM rugby_messages")
+                                    dg_conn.commit()
+                                    played_matches = rugby_cur.execute("SELECT teamA, teamB, teamA_points, teamB_points FROM matches WHERE round = ?", (current_round,)).fetchall()
+                                    schedule_message = "These are the matches of this round:\n"
+
+                                    played_lookup = {(pm[0], pm[1]): (pm[2], pm[3]) for pm in played_matches}
+                                    for teamA, teamB, timestamp, _ in scheduled_matches:
+                                        if (teamA, teamB) in played_lookup:
+                                            teamA_points, teamB_points = played_lookup[(teamA, teamB)]
+                                            schedule_message += f"\nFinal Score: {dr.get_country(teamA)} {teamA_points} - {teamB_points} {dr.get_country(teamB)}"
+                                        else:
+                                            schedule_message += f"\n{dr.get_country(teamA)} vs {dr.get_country(teamB)} at <t:{timestamp}:f> (<t:{timestamp}:R>)"
+
+                                            game_start = datetime.fromtimestamp(timestamp, tz=UTC_TZ)
+                                            if game_start - timedelta(hours=1, minutes=30) > now:
+                                                dg_cur.execute("INSERT INTO rugby_messages (scheduled_time, message) VALUES (?, ?)", ((game_start - timedelta(hours=1, minutes=30)).isoformat(),  f"Reminder: {dr.get_country(teamA)} vs {dr.get_country(teamB)} starts in 1 hour and 30 minutes!"))
+                                            if game_start - timedelta(minutes=45) > now:
+                                                dg_cur.execute("INSERT INTO rugby_messages (scheduled_time, message) VALUES (?, ?)", ((game_start - timedelta(minutes=45)).isoformat(),  f"Reminder: {dr.get_country(teamA)} vs {dr.get_country(teamB)} starts in 45 minutes!"))
+                                            if game_start - timedelta(minutes=10) > now:
+                                                dg_cur.execute("INSERT INTO rugby_messages (scheduled_time, message) VALUES (?, ?)", ((game_start - timedelta(minutes=10)).isoformat(),  f"Reminder: {dr.get_country(teamA)} vs {dr.get_country(teamB)} starts in 10 minutes!"))
+                                    dg_cur.execute("INSERT INTO rugby_messages (scheduled_time, message) VALUES (?, ?)", (now.isoformat(), schedule_message))
+                                    dg_conn.commit()
+                del dr
         except Exception as e:
             print(f"Error in schedule_rugby_matches: {e}")
-        await asyncio.sleep(1)
+        await asyncio.sleep(60)
+
+async def graceful_restart(client):
+    global restarting
+    restarting = True
+    print("Restart requested.")
+    thread = await client.fetch_channel(REPORT_STATUS_CHANNEL_ID)
+    await thread.send("Restart requested. The bot will restart in 20 seconds.")
+
+    # Wait for running commands
+    await asyncio.sleep(20)
+    await client.reddit.close()
+    await client.close()
+
+async def check_memory_status(client):
+    await client.wait_until_ready()
+    while not client.is_closed():
+        try:
+            global restarting
+            if not restarting:
+                global old_snapshot
+                new_snapshot = tracemalloc.take_snapshot()
+                memory_usage = process.memory_info().rss/1024/1024
+                result = f"RSS={memory_usage:.1f}MB with {len(asyncio.all_tasks())} tasks and {len(gc.get_objects())} objects."
+                thread = await client.fetch_channel(REPORT_STATUS_CHANNEL_ID)
+                await thread.send(result)
+                result += "\nLines that use the most memory:\n"
+                for stat in new_snapshot.compare_to(old_snapshot, "lineno")[:8]:
+                    result += str(stat) + '\n'
+                print(result)
+                old_snapshot = new_snapshot
+                if memory_usage > 190:
+                    await graceful_restart(client)
+                    return
+        except Exception as e:
+            print(f"Error checking memory status: {e}")
+        await asyncio.sleep(300)
 
 async def activate_rugby_report(client):
     await client.wait_until_ready()
     while not client.is_closed():
         try:
-            dr = DailyRugby()
-            messages = dr.handle_live_match()
-            with sqlite3.connect("DailyGamesPosts.db") as conn:
-                cur = conn.cursor()
-                # Insert into database
-                for scheduled_time, message, query in messages:
-                    cur.execute("INSERT INTO rugby_messages (scheduled_time, message, query) VALUES (?, ?, ?)", (scheduled_time, message, query))
-                conn.commit()
+            global restarting
+            if not restarting:
+                dr = DailyRugby()
+                messages = dr.handle_live_match()
+                with sqlite3.connect("DailyGamesPosts.db") as conn:
+                    cur = conn.cursor()
+                    # Insert into database
+                    for scheduled_time, message, query in messages:
+                        cur.execute("INSERT INTO rugby_messages (scheduled_time, message, query) VALUES (?, ?, ?)", (scheduled_time, message, query))
+                    conn.commit()
+                del dr
         except Exception as e:
             print(f"Error processing rugby report: {e}")
-            thread = await client.fetch_channel(TEST_CHANNEL_ID)
+            thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
             await thread.send(f"Error processing rugby report: {e}")
         await asyncio.sleep(1)
 
@@ -666,56 +753,52 @@ async def send_rugby_message(client):
     await client.wait_until_ready()
     while not client.is_closed():
         try:
-            with sqlite3.connect("DailyGamesPosts.db") as conn:
-                cur = conn.cursor()
+            global restarting
+            if not restarting:
+                with sqlite3.connect("DailyGamesPosts.db") as conn:
+                    cur = conn.cursor()
 
-                cur.execute("""
-                SELECT id, message, query
-                FROM rugby_messages
-                WHERE scheduled_time <= ?
-                ORDER BY scheduled_time
-                """, (datetime.now(UTC_TZ).isoformat(),))
+                    cur.execute("""
+                    SELECT id, message, query
+                    FROM rugby_messages
+                    WHERE scheduled_time <= ?
+                    ORDER BY scheduled_time
+                    """, (datetime.now(UTC_TZ).isoformat(),))
 
-                messages = cur.fetchall()
-                for message_id, message, query in messages:
-                    thread = await client.fetch_channel(DAILY_RUGBY_CHANNEL_ID)
+                    messages = cur.fetchall()
+                    for message_id, message, query in messages:
+                        thread = await client.fetch_channel(DAILY_RUGBY_CHANNEL_ID)
 
-                    is_first_reminder = re.match(r"Reminder: (.+) vs (.+) starts in 1 hour and 30 minutes!", message)
-                    is_game_start = re.match(r"The game between (.+) and (.+) starts in 1 minute!", message)
-                    is_end_of_break = re.match(r"The second half begins in 1 minute!", message)
-                    is_end_of_game = re.match(r"The match is over!", message)
-                    if is_first_reminder:
-                        cur.execute("UPDATE currentmatch SET matchname = ?", (f"{is_first_reminder.group(1)} vs {is_first_reminder.group(2)}",))
-                    if is_game_start:
-                        cur.execute("UPDATE currentmatch SET matchname = ?", (f"{is_game_start.group(1)} vs {is_game_start.group(2)}",))
-                    currentmatch = cur.execute("SELECT matchname FROM currentmatch").fetchone()[0]
-                    if is_first_reminder or is_game_start or is_end_of_break or is_end_of_game:
-                        cur.execute("SELECT userid FROM rugbymatchsubscriptions WHERE LOWER(matchname) = LOWER(?)", (currentmatch,))
-                        user_ids = [int(row[0]) for row in cur.fetchall()]
+                        is_first_reminder = re.match(r"Reminder: (.+) vs (.+) starts in 1 hour and 30 minutes!", message)
+                        is_game_start = re.match(r"The game between (.+) and (.+) starts in 1 minute!", message)
+                        is_end_of_break = re.match(r"The second half begins in 1 minute!", message)
+                        is_end_of_game = re.match(r"The match is over!", message)
+                        if is_first_reminder:
+                            cur.execute("UPDATE currentmatch SET matchname = ?", (f"{is_first_reminder.group(1)} vs {is_first_reminder.group(2)}",))
+                        if is_game_start:
+                            cur.execute("UPDATE currentmatch SET matchname = ?", (f"{is_game_start.group(1)} vs {is_game_start.group(2)}",))
+                        currentmatch = cur.execute("SELECT matchname FROM currentmatch").fetchone()[0]
+                        countryA, countryB = currentmatch.split(" vs ")
+                        if is_first_reminder or is_game_start or is_end_of_break or is_end_of_game:
+                            cur.execute("SELECT userid FROM rugbymatchsubscriptions WHERE LOWER(matchname) = LOWER(?) OR LOWER(matchname) = LOWER(?) OR LOWER(matchname) = LOWER(?)", (currentmatch, countryA, countryB))
+                            user_ids = [int(row[0]) for row in cur.fetchall()]
 
-                        if is_end_of_game:
-                            cur.execute("DELETE FROM rugbymatchsubscriptions WHERE LOWER(matchname) = LOWER(?)", (currentmatch,))
-                            cur.execute("DELETE FROM rugbymatches WHERE LOWER(matchname) = LOWER(?)", (currentmatch,))
+                            if is_end_of_game:
+                                cur.execute("DELETE FROM rugbymatchsubscriptions WHERE LOWER(matchname) = LOWER(?)", (currentmatch,))
+                                cur.execute("DELETE FROM rugbymatches WHERE LOWER(matchname) = LOWER(?)", (currentmatch,))
 
-                        tags = [f"<@{uid}>" for uid in user_ids]
-                        if len(tags) > 0:
-                            message += f"\nCircadians subscribed to this match: " + " ".join(tags)
+                            tags = list(set([f"<@{uid}>" for uid in user_ids]))
+                            if len(tags) > 0:
+                                message += f"\nCircadians subscribed to this match: " + " ".join(tags)
 
-                    if len(message) != 0:
-                        await thread.send(message)
-                    with sqlite3.connect("rugby.db") as rugby_conn:
-                        rugby_cur = rugby_conn.cursor()
-                        rugby_cur.executescript(query)
-                        rugby_conn.commit()
-                    cur.execute("DELETE FROM rugby_messages WHERE id = ?", (message_id,))
-                    conn.commit()
-
-                cur.execute("""
-                SELECT id, message, query
-                FROM rugby_messages
-                WHERE scheduled_time <= ?
-                ORDER BY scheduled_time
-                """, (datetime.now(UTC_TZ).isoformat(),))
+                        if len(message) != 0:
+                            await thread.send(message)
+                        with sqlite3.connect("rugby.db") as rugby_conn:
+                            rugby_cur = rugby_conn.cursor()
+                            rugby_cur.executescript(query)
+                            rugby_conn.commit()
+                        cur.execute("DELETE FROM rugby_messages WHERE id = ?", (message_id,))
+                        conn.commit()
 
         except Exception as e:
             print(f"Error sending rugby messages: {e}")
@@ -725,33 +808,33 @@ async def send_daily_date_message(client):
     await client.wait_until_ready()
     while not client.is_closed():
         try:
-            today = datetime.now(UTC_TZ).strftime('%d %B')
-            conn = sqlite3.connect("DailyGamesPosts.db")
-            cursor = conn.cursor()
-            cursor.execute("SELECT date FROM latest_daily_message")
-            last_date = cursor.fetchone()[0]
+            global restarting
+            if not restarting:
+                today = datetime.now(UTC_TZ).strftime('%d %B')
+                with sqlite3.connect("DailyGamesPosts.db") as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT date FROM latest_daily_message")
+                    last_date = cursor.fetchone()[0]
 
-            if today != last_date:
-                response = await asyncio.to_thread(requests.get, ICAL_URL)
-                cal = Calendar.from_ical(response.content)
-                del response
+                    if today != last_date:
+                        response = await asyncio.to_thread(requests.get, ICAL_URL)
+                        cal = Calendar.from_ical(response.content)
+                        del response
 
-                print(f"Looking for calendar events on {today}")
-                for component in cal.walk():
-                    if component.name == "VEVENT":
-                        if component.get('dtstart').dt.strftime('%d %B') == today:
-                            title = component.get('summary')
-                            description = component.get('description')
+                        print(f"Looking for calendar events on {today}")
+                        for component in cal.walk():
+                            if component.name == "VEVENT":
+                                if component.get('dtstart').dt.strftime('%d %B') == today:
+                                    title = component.get('summary')
+                                    description = component.get('description')
 
-                            message = f"Today ({today}) is called {title}.\n\nThis day was named by {description.split('Named by ')[1].strip().split()[0]}"
+                                    message = f"Today ({today}) is called {title}.\n\nThis day was named by {description.split('Named by ')[1].strip().split()[0]}"
 
-                            thread = await client.fetch_channel(DAILY_DATE_CHANNEL_ID)
-                            await thread.send(message)   
-                            cursor.execute("UPDATE latest_daily_message SET date = ?", (today,))             
-                            conn.commit()
-                            break
-            conn.close()
-
+                                    thread = await client.fetch_channel(DAILY_DATE_CHANNEL_ID)
+                                    await thread.send(message)   
+                                    cursor.execute("UPDATE latest_daily_message SET date = ?", (today,))             
+                                    conn.commit()
+                                    break
         except Exception as e:
             print(f"Error sending daily date message: {e}")
         await asyncio.sleep(60)
@@ -768,7 +851,11 @@ async def on_ready():
         client.tree.clear_commands(guild=guild)  # Clear global commands
         await client.tree.sync(guild=guild)  # Sync to clear guild-specific commands
         print(f"- {guild.name} (ID: {guild.id})")
-    
+
+#    with sqlite3.connect("rugby.db") as rugby_conn:
+#        rugby_cur = rugby_conn.cursor()
+#        rugby_cur.execute("UPDATE players SET is_on_field = 0 WHERE number = 23 AND team = 'AXOLOTLSTHE1'")
+#        rugby_conn.commit()
 #    guild = discord.Object(id=1292147569908125816) # DailyGames server
 #    client.tree.copy_global_to(guild=guild)
 #    await client.tree.sync(guild=guild)
@@ -783,4 +870,6 @@ async def on_ready():
         print(f"- /{cmd.name}: {cmd.description}")
     print("These were all of the registered slash commands.")
 
+    thread = await client.fetch_channel(REPORT_STATUS_CHANNEL_ID)
+    await thread.send(f"Bot has (re)started successfully.")
 client.run(TOKEN)
