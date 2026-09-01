@@ -155,7 +155,6 @@ class MyClient(discord.Client):
 
         async def interaction_check(interaction: discord.Interaction):
             global restarting
-            print(f"Restarting: {restarting}")
             if restarting:
                 await interaction.response.send_message("Bot is restarting due to memory issues. Please try again in a few seconds.", ephemeral=True)
                 return False
@@ -333,23 +332,23 @@ class MyClient(discord.Client):
                     await interaction.response.send_message(f"{team} is not playing in the current match.", ephemeral=True)
                     return
 
-                next_minute = dr.cursor().execute("SELECT last_minute FROM current_match_state").fetchone()[0] + 1
                 user_id = interaction.user.id
-                user_is_cheering = dr.cursor().execute("SELECT COUNT(uses_left) FROM cheers WHERE user_id = ? AND uses_left > 0", (user_id,)).fetchone()[0] > 0
-                if user_is_cheering:
-                    await interaction.response.send_message("You are still cheering, you can only cheer once per two minutes.", ephemeral=True)
-                    return
-                
                 number_of_cheers = dr.cursor().execute("SELECT COUNT(uses_left) FROM cheers WHERE user_id = ?", (user_id,)).fetchone()[0]
                 bonus_cheers = ('supporter' in [s[0] for s in dr.cursor().execute('SELECT specialist FROM specialists WHERE discord_user_id = ?', (user_id,)).fetchall()]) * 3
                 if number_of_cheers >= 3 + bonus_cheers:
                     await interaction.response.send_message(f"You have already cheered {3 + bonus_cheers} times, you can only cheer {3 + bonus_cheers} times per match.", ephemeral=True)
                     return
 
+                user_is_cheering = dr.cursor().execute("SELECT COUNT(uses_left) FROM cheers WHERE user_id = ? AND uses_left > 0", (user_id,)).fetchone()[0] > 0
+                if user_is_cheering:
+                    await interaction.response.send_message("You are still cheering, you can only cheer once per two minutes.", ephemeral=True)
+                    return
+                
                 username = dr.get_username(team)
+                next_minute = dr.cursor().execute("SELECT last_minute FROM current_match_state").fetchone()[0] + 1
                 dr.cursor().execute("INSERT INTO cheers (user_id, minute, uses_left, team, yell) VALUES (?, ?, 2, ?, ?)", (user_id, next_minute, username, yell))
                 dr.conn().commit()
-                await interaction.response.send_message(f"Your cheer for {team} has been scheduled! You have {3 + bonus_cheers - number_of_cheers - 1} cheers left.", ephemeral=True)
+                await interaction.response.send_message(f"Your cheer for {team} has been scheduled! You have {3 + bonus_cheers - number_of_cheers - 1} cheer{'s' if 3 + bonus_cheers - number_of_cheers - 1 != 1 else ''} left.", ephemeral=True)
                 thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
                 await thread.send(f"{interaction.user.name} cheered for {team}!")
                 del dr
@@ -380,17 +379,34 @@ class MyClient(discord.Client):
                     await interaction.response.send_message("The match outcomes have not been calculated yet. Please try again later.", ephemeral=True)
                     return
                 current_round = dr.get_next_round()
+                username = dr.get_username(team)
+                opponent = dr.cursor().execute("SELECT teamB FROM planned_matches WHERE teamA = ? AND round = ? UNION SELECT teamA FROM planned_matches WHERE teamB = ? AND round = ?", (username, current_round, username, current_round)).fetchone()
+                opponent_country = dr.get_country(opponent[0])
                 if current_round < 6 and (cake or opponent_cake):
                     await interaction.response.send_message("There are no teams with cakes during this round.", ephemeral=True)
                     return
-                username = dr.get_username(team)
-                opponent = dr.cursor().execute("SELECT teamB FROM planned_matches WHERE teamA = ? AND round = ? UNION SELECT teamA FROM planned_matches WHERE teamB = ? AND round = ?", (username, current_round, username, current_round)).fetchone()
+                else:
+                    nCakes = dr.cursor().execute('SELECT COUNT(cake) FROM cakes WHERE username = ?', (username,)).fetchone()[0]
+                    nCakesOpponent = dr.cursor().execute('SELECT COUNT(cake) FROM cakes WHERE username = ?', (opponent[0],)).fetchone()[0]
+                    if cake and nCakes == 0:
+                        await interaction.response.send_message(f"{team} does not have a cake available.", ephemeral=True)
+                        return
+                    if opponent_cake and nCakesOpponent == 0:
+                        await interaction.response.send_message(f"{opponent_country} (the opponent) does not have a cake available.", ephemeral=True)
+                        return
+                    nMatchesLeft = dr.cursor().execute('SELECT COUNT(*) FROM planned_matches WHERE (teamA = ? OR teamB = ?)', (username, username)).fetchone()[0]
+                    nMatchesLeftOpponent = dr.cursor().execute('SELECT COUNT(*) FROM planned_matches WHERE (teamA = ? OR teamB = ?)', (opponent[0], opponent[0])).fetchone()[0]
+                    if nCakes == nMatchesLeft and not cake:
+                        await interaction.response.send_message(f"{team} is guaranteed to use a cake for this match.", ephemeral=True)
+                        return
+                    if nCakesOpponent == nMatchesLeftOpponent and not opponent_cake:
+                        await interaction.response.send_message(f"{opponent_country} (the opponent) is guaranteed to use a cake for this match.", ephemeral=True)
+                        return
                 if not opponent:
                     await interaction.response.send_message(f"No opponent found for {team} in round {current_round}.", ephemeral=True)
                     return
-                opponent = dr.get_country(opponent[0])
 
-                result = dr.get_match_probability(team, opponent, tacticA = tactic, tacticB = opponent_tactic, morale_bonusA = dr.get_morale_bonus(team, current_round), morale_bonusB = dr.get_morale_bonus(opponent, current_round), cakeA = cake, cakeB = opponent_cake)[team]
+                result = dr.get_match_probability(team, opponent_country, tacticA = tactic, tacticB = opponent_tactic, morale_bonusA = dr.get_morale_bonus(team, current_round), morale_bonusB = dr.get_morale_bonus(opponent_country, current_round), cakeA = cake, cakeB = opponent_cake)[team]
                 tactic_str = f"the {tactic} tactic" if tactic else "no tactic"
                 opponent_tactic_str = f"the {opponent_tactic} tactic" if opponent_tactic else "no tactic"
                 cake_str = " and a cake" if cake else ""
@@ -399,10 +415,9 @@ class MyClient(discord.Client):
                 if decimals < 0 or decimals > 10:
                     await interaction.response.send_message("The number of decimals must be an integer between 0 and 10.", ephemeral=True)
                     return
-                await interaction.response.send_message(f"The probability of {team} (using {tactic_str}{cake_str}) to win against {opponent} (using {opponent_tactic_str}{opponent_cake_str}) is: {result*100:.{decimals}f}%", ephemeral=private)
-                if private:
-                    thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
-                    await thread.send(f"{interaction.user.name} requested the odds for {team} (using {tactic_str}{cake_str}) to win against {opponent} (using {opponent_tactic_str}{opponent_cake_str}).")
+                await interaction.response.send_message(f"The probability of {team} (using {tactic_str}{cake_str}) to win against {opponent_country} (using {opponent_tactic_str}{opponent_cake_str}) is: {result*100:.{decimals}f}%", ephemeral=private)
+                thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
+                await thread.send(f"{interaction.user.name} requested the odds for {team} (using {tactic_str}{cake_str}) to win against {opponent_country} (using {opponent_tactic_str}{opponent_cake_str}).")
                 del dr
             except Exception as e:
                 print(f"Error in getrugbyodds: {e}")
@@ -696,7 +711,7 @@ async def graceful_restart(client):
     global restarting
     restarting = True
     print("Restart requested.")
-    thread = await client.fetch_channel(REPORT_STATUS_CHANNEL_ID)
+    thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
     await thread.send("Restart requested. The bot will restart in 20 seconds.")
 
     # Wait for running commands
