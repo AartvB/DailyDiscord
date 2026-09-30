@@ -16,6 +16,7 @@ import psutil
 import tracemalloc
 import gc
 import sys
+import json
 
 restarting = False
 process = psutil.Process(os.getpid())
@@ -138,6 +139,13 @@ def setup_database():
         if (cursor.execute('SELECT COUNT(*) FROM latest_daily_message').fetchone()[0] == 0):
             cursor.execute('INSERT INTO latest_daily_message (date) VALUES (?)', (datetime.now().strftime("%Y-%m-%d"),))
         conn.commit()
+
+async def autocomplete_scream(interaction: discord.Interaction, current: str):
+    with open("screams.json", "r") as f:
+        screams = json.load(f)
+    result = [discord.app_commands.Choice(name=key, value=key) for key, row in screams.items() if current.lower() in key.lower()][:25]
+    del screams
+    return result
 
 class MyClient(discord.Client):
     async def setup_hook(self):
@@ -531,6 +539,21 @@ class MyClient(discord.Client):
             except Exception as e:
                 print(f"Error in addposttoseries: {e}")
                 await interaction.response.send_message(f"An error occurred while adding the post to the series: {e}.", ephemeral=True)
+
+        @self.tree.command(name="screamifyoulove", description="Scream if you love a country!")
+        @discord.app_commands.describe(country="The country to love")
+        @discord.app_commands.describe(love="Do you love the country?")
+        @discord.app_commands.autocomplete(country=autocomplete_scream)
+        async def screamifyoulove(interaction: discord.Interaction, country: str, love: bool = True):
+            with open("screams.json", "r") as f:
+                screams = json.load(f)
+            if country not in screams:
+                await interaction.response.send_message(f"Sorry, I don't have a scream for {country}.", ephemeral=True)
+                return
+            embed = discord.Embed()
+            embed.set_image(url=screams[country]["Love" if love else "Hate"])
+            del screams
+            await interaction.response.send_message(f"<@{interaction.user.id}> {'loves' if love else "doesn't love"} {country}!", embed=embed)
 
         @self.tree.command(name="removebotmessage", description="Remove a message of the bot")
         @discord.app_commands.describe(message_link="The link to the message to remove")
