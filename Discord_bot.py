@@ -606,9 +606,11 @@ class MyClient(discord.Client):
                         await interaction.response.send_message("This post was already reported as an advertisement.", ephemeral=True)
                         return
                     cursor.execute("UPDATE latest_ad SET timestamp = ?", (post_time,))
+                    conn.commit()
                 delta = int(post_time - latest_ad_timestamp); days, rem = divmod(delta, 24 * 60 * 60); hours, rem = divmod(rem, 60 * 60); minutes, seconds = divmod(rem, 60)
+                delta_since_post = int(time.time() - post_time); days_since_post, rem_since_post = divmod(delta_since_post, 24 * 60 * 60); hours_since_post, rem_since_post = divmod(rem_since_post, 60 * 60); minutes_since_post, seconds_since_post = divmod(rem_since_post, 60)
                 thread = await self.fetch_channel(ADVERTISEMENT_CHANNEL_ID)
-                await thread.send(f"A new advertisement was posted on r/dailygames. It has been {int(days)} days, {int(hours)} hours, {int(minutes)} minutes, and {int(seconds)} seconds since the last one.")
+                await thread.send(f"A new advertisement was posted on r/dailygames {int(days_since_post)} days, {int(hours_since_post)} hours, {int(minutes_since_post)} minutes, and {int(seconds_since_post)} seconds ago. It has been {int(days)} days, {int(hours)} hours, {int(minutes)} minutes, and {int(seconds)} seconds since the last one.")
                 await interaction.response.send_message(f"Thank you for reporting the advertisement. I have recorded it and notified the appropriate channel.", ephemeral=True)
                 thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
                 await thread.send(f"{interaction.user.name} reported a new advertisement: {post_link}.")
