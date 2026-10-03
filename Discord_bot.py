@@ -1,4 +1,5 @@
 import os
+import random
 from xmlrpc import client
 import discord
 import asyncio
@@ -556,6 +557,21 @@ class MyClient(discord.Client):
             embed.set_image(url=screams[country]["Love" if love else "Hate"])
             del screams
             await interaction.response.send_message(f"<@{interaction.user.id}> {'loves' if love else "doesn't love"} {country}!", embed=embed)
+
+        @self.tree.command(name="punish", description="Punish a user!")
+        @discord.app_commands.describe(user="The user to punish")
+        @discord.app_commands.describe(reason="You want to punish them because ...")
+        async def punish(interaction: discord.Interaction, user: discord.User, reason: str = None):
+            with open("punishments.json", "r") as f:
+                p = json.load(f)
+            punishment = random.choice(p['templates']).format(actionA=random.choice(p['actionsA']), actionB=random.choice(p['actionsB']), object=random.choice(p['objects']), punishment=random.choice(p['punishments']), a=f"<@{interaction.user.id}>", b=f"<@{user.id}>")
+            if random.random() < 0.5:
+                punishment += " " + random.choice(p['flavors'])
+            if reason:
+                punishment += f", because {reason}"
+            punishment += "."
+            del p
+            await interaction.response.send_message(punishment)
 
         @self.tree.command(name="removebotmessage", description="Remove a message of the bot")
         @discord.app_commands.describe(message_link="The link to the message to remove")
