@@ -38,6 +38,8 @@ TEST_CHANNEL_ID = os.getenv('TEST_CHANNEL_ID')
 REPORT_ACTIONS_CHANNEL_ID = os.getenv('REPORT_ACTIONS_CHANNEL_ID')
 REPORT_STATUS_CHANNEL_ID = os.getenv('REPORT_STATUS_CHANNEL_ID')
 ADVERTISEMENT_CHANNEL_ID = os.getenv('ADVERTISEMENT_CHANNEL_ID')
+HUMAN_OVERLORD_ROLE_ID = os.getenv('HUMAN_OVERLORD_ROLE_ID')
+BOTBOUWER_ROLE_ID = os.getenv('BOTBOUWER_ROLE_ID')
 ICAL_URL = os.getenv('ICAL_URL')
 
 # Autocomplete helpers
@@ -433,7 +435,7 @@ class MyClient(discord.Client):
 
         @self.tree.command(name="addseries", description="Add a new DailyGame to subscribe to")
         @discord.app_commands.describe(text="The name of the new series")
-        @discord.app_commands.checks.has_role('Human Overlord')
+        @discord.app_commands.checks.has_role('HUMAN_OVERLORD_ROLE_ID')
         async def addSeries(interaction: discord.Interaction, text: str):
             try:
                 with sqlite3.connect("DailyGamesPosts.db") as conn:
@@ -457,7 +459,7 @@ class MyClient(discord.Client):
         @self.tree.command(name="renameseries", description="Rename a DailyGame")
         @discord.app_commands.describe(old_name="The current name of the series", new_name="The new name for the series")
         @discord.app_commands.autocomplete(old_name=autocomplete_all_series)
-        @discord.app_commands.checks.has_role('Human Overlord')
+        @discord.app_commands.checks.has_role('HUMAN_OVERLORD_ROLE_ID')
         async def renameSeries(interaction: discord.Interaction, old_name: str, new_name: str):
             try:
                 with sqlite3.connect("DailyGamesPosts.db") as conn:
@@ -492,7 +494,7 @@ class MyClient(discord.Client):
         @self.tree.command(name="addposttoseries", description="Add a post to a series if it was not correctly recognized")
         @discord.app_commands.describe(series_name="The name of the series to add the post to")
         @discord.app_commands.autocomplete(series_name=autocomplete_all_series)
-        @discord.app_commands.checks.has_role('Human Overlord')
+        @discord.app_commands.checks.has_role('HUMAN_OVERLORD_ROLE_ID')
         async def addposttoseries(interaction: discord.Interaction, series_name: str, reddit_link: str):
             match = re.search(r'comments/([a-z0-9]+)/', reddit_link)
             if not match:
@@ -557,7 +559,7 @@ class MyClient(discord.Client):
 
         @self.tree.command(name="removebotmessage", description="Remove a message of the bot")
         @discord.app_commands.describe(message_link="The link to the message to remove")
-        @discord.app_commands.checks.has_role('Botbouwer')
+        @discord.app_commands.checks.has_role('BOTBOUWER_ROLE_ID')
         async def removebotmessage(interaction: discord.Interaction, message_link: str):
             match = re.search(r'/channels/\d+/(\d+)/(\d+)', message_link)
             if not match:
@@ -880,6 +882,7 @@ async def send_daily_date_message(client):
         await asyncio.sleep(60)
 
 intents = discord.Intents.default()
+intents.message_content = True
 client = MyClient(intents=intents)
 
 @client.event
@@ -887,10 +890,27 @@ async def on_ready():
     setup_database()
     print(f'Logged in as {client.user} (ID: {client.user.id})')
     print('Guilds the bot is in:')
+    channel_id = 0
     for guild in client.guilds:
         client.tree.clear_commands(guild=guild)  # Clear global commands
         await client.tree.sync(guild=guild)  # Sync to clear guild-specific commands
         print(f"- {guild.name} (ID: {guild.id})")
+        print(f"Channels in {guild.name}:")
+        if guild.id not in [666183635556368384, 1292147569908125816, 666182291512623115]:
+            for channel in guild.channels:
+                print(f"  - {channel.name} (ID: {channel.id})")
+                if isinstance(channel, discord.TextChannel):
+                    channel_id += 1
+                    messages = []
+                    # check if channel is a text channel and fetch the last 1000 messages
+                    async for message in channel.history(limit=1000):
+                        messages.append(message)
+
+                    # write them to a text file
+                    with open(f"{channel_id}_messages.txt", "w", encoding="utf-8") as f:
+                        f.write(f"Messages from channel: {channel.name} (ID: {channel.id})\n")
+                        for message in reversed(messages):
+                            f.write(f"{message.created_at} - {message.author}: {message.content}\n")
 
 #    with sqlite3.connect("rugby.db") as rugby_conn:
 #        rugby_cur = rugby_conn.cursor()
