@@ -563,7 +563,7 @@ class MyClient(discord.Client):
         @discord.app_commands.describe(user="The user to punish")
         @discord.app_commands.describe(reason="You want to punish them because ...")
         async def punish(interaction: discord.Interaction, user: discord.User, reason: str = None):
-            if len(reason) > 1500:
+            if reason and len(reason) > 1500:
                 await interaction.response.send_message("Reason is too long. Please keep it under 1500 characters.", ephemeral=True)
                 return
             with open("punishments.json", "r") as f:
