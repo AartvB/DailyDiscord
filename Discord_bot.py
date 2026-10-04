@@ -577,6 +577,13 @@ class MyClient(discord.Client):
             del p
             await interaction.response.send_message(punishment)
 
+        @self.tree.command(name="restart", description="Restart the bot")
+        @discord.app_commands.checks.has_role(BOTBOUWER_ROLE_ID)
+        async def restart(interaction: discord.Interaction):
+            await interaction.response.send_message("Restarting the bot in 20 seconds.", ephemeral=True)
+            await graceful_restart(client)
+            await client.close()
+
         @self.tree.command(name="removebotmessage", description="Remove a message of the bot")
         @discord.app_commands.describe(message_link="The link to the message to remove")
         @discord.app_commands.checks.has_role(BOTBOUWER_ROLE_ID)
