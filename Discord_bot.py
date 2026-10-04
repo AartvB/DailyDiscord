@@ -39,8 +39,8 @@ TEST_CHANNEL_ID = os.getenv('TEST_CHANNEL_ID')
 REPORT_ACTIONS_CHANNEL_ID = os.getenv('REPORT_ACTIONS_CHANNEL_ID')
 REPORT_STATUS_CHANNEL_ID = os.getenv('REPORT_STATUS_CHANNEL_ID')
 ADVERTISEMENT_CHANNEL_ID = os.getenv('ADVERTISEMENT_CHANNEL_ID')
-HUMAN_OVERLORD_ROLE_ID = os.getenv('HUMAN_OVERLORD_ROLE_ID')
-BOTBOUWER_ROLE_ID = os.getenv('BOTBOUWER_ROLE_ID')
+HUMAN_OVERLORD_ROLE_ID = int(os.getenv('HUMAN_OVERLORD_ROLE_ID'))
+BOTBOUWER_ROLE_ID = int(os.getenv('BOTBOUWER_ROLE_ID'))
 ICAL_URL = os.getenv('ICAL_URL')
 
 # Autocomplete helpers
@@ -436,7 +436,7 @@ class MyClient(discord.Client):
 
         @self.tree.command(name="addseries", description="Add a new DailyGame to subscribe to")
         @discord.app_commands.describe(text="The name of the new series")
-        @discord.app_commands.checks.has_role('HUMAN_OVERLORD_ROLE_ID')
+        @discord.app_commands.checks.has_role(HUMAN_OVERLORD_ROLE_ID)
         async def addSeries(interaction: discord.Interaction, text: str):
             try:
                 with sqlite3.connect("DailyGamesPosts.db") as conn:
@@ -460,7 +460,7 @@ class MyClient(discord.Client):
         @self.tree.command(name="renameseries", description="Rename a DailyGame")
         @discord.app_commands.describe(old_name="The current name of the series", new_name="The new name for the series")
         @discord.app_commands.autocomplete(old_name=autocomplete_all_series)
-        @discord.app_commands.checks.has_role('HUMAN_OVERLORD_ROLE_ID')
+        @discord.app_commands.checks.has_role(HUMAN_OVERLORD_ROLE_ID)
         async def renameSeries(interaction: discord.Interaction, old_name: str, new_name: str):
             try:
                 with sqlite3.connect("DailyGamesPosts.db") as conn:
@@ -494,8 +494,9 @@ class MyClient(discord.Client):
 
         @self.tree.command(name="addposttoseries", description="Add a post to a series if it was not correctly recognized")
         @discord.app_commands.describe(series_name="The name of the series to add the post to")
+        @discord.app_commands.describe(reddit_link="The link to the Reddit post")
         @discord.app_commands.autocomplete(series_name=autocomplete_all_series)
-        @discord.app_commands.checks.has_role('HUMAN_OVERLORD_ROLE_ID')
+        @discord.app_commands.checks.has_role(HUMAN_OVERLORD_ROLE_ID)
         async def addposttoseries(interaction: discord.Interaction, series_name: str, reddit_link: str):
             match = re.search(r'comments/([a-z0-9]+)/', reddit_link)
             if not match:
@@ -562,6 +563,9 @@ class MyClient(discord.Client):
         @discord.app_commands.describe(user="The user to punish")
         @discord.app_commands.describe(reason="You want to punish them because ...")
         async def punish(interaction: discord.Interaction, user: discord.User, reason: str = None):
+            if len(reason) > 1500:
+                await interaction.response.send_message("Reason is too long. Please keep it under 1500 characters.", ephemeral=True)
+                return
             with open("punishments.json", "r") as f:
                 p = json.load(f)
             punishment = random.choice(p['templates']).format(actionA=random.choice(p['actionsA']), actionB=random.choice(p['actionsB']), object=random.choice(p['objects']), punishment=random.choice(p['punishments']), a=f"<@{interaction.user.id}>", b=f"<@{user.id}>")
@@ -575,7 +579,7 @@ class MyClient(discord.Client):
 
         @self.tree.command(name="removebotmessage", description="Remove a message of the bot")
         @discord.app_commands.describe(message_link="The link to the message to remove")
-        @discord.app_commands.checks.has_role('BOTBOUWER_ROLE_ID')
+        @discord.app_commands.checks.has_role(BOTBOUWER_ROLE_ID)
         async def removebotmessage(interaction: discord.Interaction, message_link: str):
             match = re.search(r'/channels/\d+/(\d+)/(\d+)', message_link)
             if not match:
@@ -936,6 +940,7 @@ async def on_ready():
 #    client.tree.copy_global_to(guild=guild)
 #    await client.tree.sync(guild=guild)
 #    print("Slash commands synced locally.")
+#    await client.tree.clear_commands(guild=discord.Object(id=1292147569908125816))
 
     await client.tree.sync()
     print("Slash commands synced globally.")
