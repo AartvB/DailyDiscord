@@ -84,27 +84,6 @@ async def autocomplete_all_series(interaction: discord.Interaction, current: str
         cursor.execute("SELECT name FROM series WHERE LOWER(name) LIKE ? ORDER BY name LIMIT 25", (f"{current.lower()}%",))
         return [discord.app_commands.Choice(name=row[0], value=row[0]) for row in cursor.fetchall()]
 
-async def autocomplete_rugby_team(interaction: discord.Interaction, current: str):
-    dr = DailyRugby()
-    current_round = dr.get_next_round()
-    dr.cursor().execute('SELECT teamA, teamB FROM planned_matches WHERE round = ?', (current_round,))
-    planned_matches = dr.cursor().fetchall()
-    dr.cursor().execute('SELECT teamA, teamB FROM matches WHERE round = ?', (current_round,))
-    matches = dr.cursor().fetchall()
-    countries = set()
-    for match in matches:
-        dr.cursor().execute('SELECT country FROM teams WHERE username = ?', (match[0],))
-        countries.add(dr.cursor().fetchone()[0])
-        dr.cursor().execute('SELECT country FROM teams WHERE username = ?', (match[1],))
-        countries.add(dr.cursor().fetchone()[0])
-    for match in planned_matches:
-        dr.cursor().execute('SELECT country FROM teams WHERE username = ?', (match[0],))
-        countries.add(dr.cursor().fetchone()[0])
-        dr.cursor().execute('SELECT country FROM teams WHERE username = ?', (match[1],))
-        countries.add(dr.cursor().fetchone()[0])
-    del dr
-    return [discord.app_commands.Choice(name=country, value=country) for country in sorted(list(countries)) if country.lower().startswith(current.lower())]
-
 async def autocomplete_cheer(interaction: discord.Interaction, current: str):
     try:
         dr = DailyRugby()
