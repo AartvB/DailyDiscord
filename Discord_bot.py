@@ -567,11 +567,34 @@ class MyClient(discord.Client):
                 return
             with open("punishments.json", "r") as f:
                 p = json.load(f)
-            punishment = random.choice(p['templates']).format(actionA=random.choice(p['actionsA']), actionB=random.choice(p['actionsB']), object=random.choice(p['objects']), punishment=random.choice(p['punishments']), a=f"<@{interaction.user.id}>", b=f"<@{user.id}>")
+
+            PLACEHOLDER = re.compile(r"\{(\w+)\}")
+            def format_recursive(text, values, max_depth=20):
+                for _ in range(max_depth):
+                    changed = False
+                    def replace(match):
+                        nonlocal changed
+                        key = match.group(1)
+                        if key not in values:
+                            return match.group(0)
+                        changed = True
+                        return str(values[key])
+                    new_text = PLACEHOLDER.sub(replace, text)
+                    if not changed or new_text == text:
+                        return new_text
+                    text = new_text
+                raise ValueError(
+                    f"Maximum template nesting depth ({max_depth}) exceeded. "
+                    "Possible circular reference."
+                )
+
+            punishment = random.choice(p['templates'])
             if random.random() < 0.5:
                 punishment += " " + random.choice(p['flavors'])
+            punishment = format_recursive(punishment, {'actionA': random.choice(p['actionsA']), 'actionB': random.choice(p['actionsB']), 'object': random.choice(p['objects']), 'punishment': random.choice(p['punishments']), 'a': f"<@{interaction.user.id}>", 'b': f"<@{user.id}>"})
             if reason:
                 punishment += f", because {reason}"
+
             punishment += "."
             del p
             await interaction.response.send_message(punishment)

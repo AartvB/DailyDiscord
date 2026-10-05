@@ -157,7 +157,11 @@
         "{a} activates the emergency protocol requiring {b} {punishment}",
         "{a} declares an official state of silliness and forces {b} {punishment}",
         "{a} announces that justice demands {b} {punishment}",
-        "{a} determines that the only reasonable solution is for {b} {punishment}"
+        "{a} determines that the only reasonable solution is for {b} {punishment}",
+        "{a} causes {b} to be banned from reddit",
+        "{a} causes {b} to be banned from discord",
+        "{a} looks at {b} like <:Thomas:1325912840321630250>",
+        "{a} gives {b} some <:estrogen:1450625442884096081>"
     ],
     "actionsA": ["spanks {b}", "bonks {b}", "boops {b} ", "flicks {b}", "tickles {b}", "pelts {b}",
         "launches a pillow at {b}", "hands a rubber duck to {b}", "makes {b} wear a cone of shame for",
@@ -364,7 +368,7 @@
         "makes {b} write an essay about"
     ],
     "objects": [
-        "a suspiciously judgmental rubber duck", "the Discord server mascot", ":Evan:",
+        "a suspiciously judgmental rubber duck", "the Discord server mascot", "<:Evan:1314782841229414521>",
         "a single uncooked spaghetti noodle", "the sacred snack drawer",
         "the emergency kazoo", "the legendary sock pile", "a cardboard crown",
         "the forbidden beanbag", "an army of plush frogs", "the group chat archives",
@@ -604,7 +608,9 @@
         "to recite a completely fictional law code",
         "to deliver a passionate speech defending the honor of the humble spoon",
         "to apologize to the entire room for their behavior",
-        "to check if there are new advertisments posted to r/dailygames"
+        "to check if there are new advertisments posted to r/dailygames",
+        "to go to Epstein Island for one day",
+        "to pay 358 <:DailyDollar:1355999255327936793> to {a}"
     ],
     "flavors": [
         "with extreme bureaucratic efficiency",
