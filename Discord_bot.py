@@ -145,7 +145,7 @@ class MyClient(discord.Client):
         async def interaction_check(interaction: discord.Interaction):
             global restarting
             if restarting:
-                await interaction.response.send_message("Bot is restarting due to memory issues. Please try again in a few seconds.", ephemeral=True)
+                await interaction.response.send_message("Bot is restarting. Please try again in 30 seconds.", ephemeral=True)
                 return False
             return True
 
@@ -857,6 +857,7 @@ async def on_ready():
         print(f"- {guild.name} (ID: {guild.id})")
         print(f"Channels in {guild.name}:")
         if guild.id not in [666183635556368384, 1292147569908125816, 666182291512623115]:
+            print(f"Channels in {guild.name}:")
             for channel in guild.channels:
                 print(f"  - {channel.name} (ID: {channel.id})")
                 if isinstance(channel, discord.TextChannel):
