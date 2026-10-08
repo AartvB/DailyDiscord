@@ -197,7 +197,8 @@
         "causes {b} to be banned from reddit",
         "causes {b} to be banned from discord",
         "looks at {b} like <:Thomas:1325912840321630250>",
-        "gives {b} some <:estrogen:1450625442884096081>"
+        "gives {b} some <:estrogen:1450625442884096081>",
+        "forces {b} to create the next installment of {series}"
     ],
     "actionsB": [
         "makes {b} carry", "makes {b} polish", "makes {b} alphabetize", "makes {b} count",
@@ -476,7 +477,8 @@
         "the server's official complaint box",
         "a mysterious box of buttons",
         "the ceremonial bucket of foam",
-        "a suspiciously majestic feather duster"
+        "a suspiciously majestic feather duster",
+        "the next installment of {series}"
     ],
     "punishments": [
         "to play Monopoly with {a}",
@@ -618,7 +620,8 @@
         "to check if there are new advertisments posted to r/dailygames",
         "to go to Epstein Island for one day",
         "to pay 358 <:DailyDollar:1355999255327936793> to {a}",
-        "to climb a volcano barefoot"
+        "to climb a volcano barefoot",
+        "to create the next installment of {series}"
     ],
     "flavors": [
         "with extreme bureaucratic efficiency",
@@ -737,6 +740,16 @@
         "as the snack committee silently approves",
         "while an imaginary narrator declares it historic",
         "with maximum levels of administrative nonsense",
-        "as everyone agrees this seemed like a good idea at the time"
+        "as everyone agrees this seemed like a good idea at the time",
+        "until the next {series}'s post is out"
+    ],
+    "series": [
+        "DailyGrandPrix",
+        "DailyVille",
+        "Dungeoneer",
+        "The adventures of zizi",
+        "The Connection",
+        "Daily Hunger Games",
+        "Daily Advertisement"
     ]
 }

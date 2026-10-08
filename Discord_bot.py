@@ -286,7 +286,7 @@ class MyClient(discord.Client):
                     await interaction.response.send_message("Player number must be between 1 and 23.", ephemeral=True)
                     return
                 teams = dr.cursor().execute("SELECT teamA, teamB FROM current_match_state").fetchone()
-                if dr.get_username(team) not in teams:
+                if team not in teams:
                     await interaction.response.send_message(f"{team} is not playing in the current match.", ephemeral=True)
                     return
 
@@ -317,7 +317,7 @@ class MyClient(discord.Client):
                     return
                 
                 teams = dr.cursor().execute("SELECT teamA, teamB FROM current_match_state").fetchone()
-                if dr.get_username(team) not in teams:
+                if team not in teams:
                     await interaction.response.send_message(f"{team} is not playing in the current match.", ephemeral=True)
                     return
 
@@ -333,9 +333,8 @@ class MyClient(discord.Client):
                     await interaction.response.send_message("You are still cheering, you can only cheer once per two minutes.", ephemeral=True)
                     return
                 
-                username = dr.get_username(team)
                 next_minute = dr.cursor().execute("SELECT last_minute FROM current_match_state").fetchone()[0] + 1
-                dr.cursor().execute("INSERT INTO cheers (user_id, minute, uses_left, team, yell) VALUES (?, ?, 2, ?, ?)", (user_id, next_minute, username, yell))
+                dr.cursor().execute("INSERT INTO cheers (user_id, minute, uses_left, team, yell) VALUES (?, ?, 2, ?, ?)", (user_id, next_minute, team, yell))
                 dr.conn().commit()
                 await interaction.response.send_message(f"Your cheer for {team} has been scheduled! You have {3 + bonus_cheers - number_of_cheers - 1} cheer{'s' if 3 + bonus_cheers - number_of_cheers - 1 != 1 else ''} left.", ephemeral=True)
                 thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
@@ -503,7 +502,7 @@ class MyClient(discord.Client):
             punishment = random.choice(p['templates'])
             if random.random() < 0.5:
                 punishment += " " + random.choice(p['flavors'])
-            punishment = format_recursive(punishment, {'actionA': random.choice(p['actionsA']), 'actionB': random.choice(p['actionsB']), 'object': random.choice(p['objects']), 'punishment': random.choice(p['punishments']), 'a': f"<@{interaction.user.id}>", 'b': f"<@{user.id}>"})
+            punishment = format_recursive(punishment, {'actionA': random.choice(p['actionsA']), 'actionB': random.choice(p['actionsB']), 'object': random.choice(p['objects']), 'punishment': random.choice(p['punishments']), 'series': random.choice(p['series']), 'a': f"<@{interaction.user.id}>", 'b': f"<@{user.id}>"})
             if reason:
                 punishment += f", because {reason}"
 
