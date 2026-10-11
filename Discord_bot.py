@@ -307,6 +307,9 @@ class MyClient(discord.Client):
         @discord.app_commands.autocomplete(team=autocomplete_cheer)
         async def cheer(interaction: discord.Interaction, team: str, yell: str = None):
             try:
+                if interaction.guild.id != DAILY_GAMES_ID:
+                    await interaction.response.send_message("You can only cheer from the official DailyDiscord server.", ephemeral=True)
+                    return
                 dr = DailyRugby()
                 if not dr.match_is_ongoing() or dr.cursor().execute("SELECT last_minute FROM current_match_state").fetchone()[0] == 79:
                     await interaction.response.send_message("There is no ongoing match to cheer for.", ephemeral=True)
@@ -500,9 +503,15 @@ class MyClient(discord.Client):
                 )
 
             punishment = random.choice(p['templates'])
+            source = interaction.user.id
+            target = user.id
+            if target == DAILYGAMES_BOT_ID:
+                target = source
+                source = DAILYGAMES_BOT_ID
+                reason = f"they tried to punish me{f' because {reason}' if reason else ''}"
             if random.random() < 0.5:
                 punishment += " " + random.choice(p['flavors'])
-            punishment = format_recursive(punishment, {'actionA': random.choice(p['actionsA']), 'actionB': random.choice(p['actionsB']), 'object': random.choice(p['objects']), 'punishment': random.choice(p['punishments']), 'series': random.choice(p['series']), 'a': f"<@{interaction.user.id}>", 'b': f"<@{user.id}>"})
+            punishment = format_recursive(punishment, {'actionA': random.choice(p['actionsA']), 'actionB': random.choice(p['actionsB']), 'object': random.choice(p['objects']), 'punishment': random.choice(p['punishments']), 'series': random.choice(p['series']), 'a': f"<@{source}>", 'b': f"<@{target}>"})
             if reason:
                 punishment += f", because {reason}"
 
@@ -849,29 +858,6 @@ client = MyClient(intents=intents)
 async def on_ready():
     setup_database()
     print(f'Logged in as {client.user} (ID: {client.user.id})')
-    print('Guilds the bot is in:')
-    channel_id = 0
-    for guild in client.guilds:
-        client.tree.clear_commands(guild=guild)  # Clear global commands
-        await client.tree.sync(guild=guild)  # Sync to clear guild-specific commands
-        print(f"- {guild.name} (ID: {guild.id})")
-        print(f"Channels in {guild.name}:")
-        if guild.id not in [666183635556368384, 1292147569908125816, 666182291512623115]:
-            print(f"Channels in {guild.name}:")
-            for channel in guild.channels:
-                print(f"  - {channel.name} (ID: {channel.id})")
-                if isinstance(channel, discord.TextChannel):
-                    channel_id += 1
-                    messages = []
-                    # check if channel is a text channel and fetch the last 1000 messages
-                    async for message in channel.history(limit=1000):
-                        messages.append(message)
-
-                    # write them to a text file
-                    with open(f"{channel_id}_messages.txt", "w", encoding="utf-8") as f:
-                        f.write(f"Messages from channel: {channel.name} (ID: {channel.id})\n")
-                        for message in reversed(messages):
-                            f.write(f"{message.created_at} - {message.author}: {message.content}\n")
 
 #    with sqlite3.connect("rugby.db") as rugby_conn:
 #        rugby_cur = rugby_conn.cursor()
@@ -894,4 +880,31 @@ async def on_ready():
 
     thread = await client.fetch_channel(REPORT_STATUS_CHANNEL_ID)
     await thread.send(f"Bot has (re)started successfully.")
+
+    print('Guilds the bot is in:')
+    channel_id = 0
+    for guild in client.guilds:
+        client.tree.clear_commands(guild=guild)  # Clear global commands
+        await client.tree.sync(guild=guild)  # Sync to clear guild-specific commands
+        print(f"- {guild.name} (ID: {guild.id})")
+        print(f"Channels in {guild.name}:")
+        if guild.id not in [666183635556368384, 1292147569908125816, 666182291512623115]:
+            print(f"Channels in {guild.name}:")
+            for channel in guild.channels:
+                print(f"  - {channel.name} (ID: {channel.id})")
+                if isinstance(channel, discord.TextChannel):
+                    channel_id += 1
+                    messages = []
+                    # check if channel is a text channel and fetch the last 1000 messages
+                    try: 
+                        async for message in channel.history(limit=1000):
+                            messages.append(message)
+
+                        # write them to a text file
+                        with open(f"{channel_id}_messages.txt", "w", encoding="utf-8") as f:
+                            f.write(f"Messages from channel: {channel.name} (ID: {channel.id})\n")
+                            for message in reversed(messages):
+                                f.write(f"{message.created_at} - {message.author}: {message.content}\n")
+                    except:
+                        pass
 client.run(TOKEN)
