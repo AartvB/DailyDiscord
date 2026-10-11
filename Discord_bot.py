@@ -1,3 +1,4 @@
+from io import BytesIO
 import os
 import random
 from xmlrpc import client
@@ -18,6 +19,7 @@ import tracemalloc
 import gc
 import sys
 import json
+from PIL import Image, ImageDraw, ImageFont
 
 restarting = False
 process = psutil.Process(os.getpid())
@@ -40,6 +42,8 @@ REPORT_STATUS_CHANNEL_ID = os.getenv('REPORT_STATUS_CHANNEL_ID')
 ADVERTISEMENT_CHANNEL_ID = os.getenv('ADVERTISEMENT_CHANNEL_ID')
 HUMAN_OVERLORD_ROLE_ID = int(os.getenv('HUMAN_OVERLORD_ROLE_ID'))
 BOTBOUWER_ROLE_ID = int(os.getenv('BOTBOUWER_ROLE_ID'))
+DAILY_GAMES_ID = int(os.getenv('DAILY_GAMES_ID'))
+DAILYGAMES_BOT_ID = int(os.getenv('DAILYGAMES_BOT_ID'))
 ICAL_URL = os.getenv('ICAL_URL')
 
 # Autocomplete helpers
@@ -457,20 +461,90 @@ class MyClient(discord.Client):
                 print(f"Error in addposttoseries: {e}")
                 await interaction.response.send_message(f"An error occurred while adding the post to the series: {e}.", ephemeral=True)
 
-        @self.tree.command(name="screamifyoulove", description="Scream if you love a country!")
-        @discord.app_commands.describe(country="The country to love")
-        @discord.app_commands.describe(love="Do you love the country?")
-        @discord.app_commands.autocomplete(country=autocomplete_scream)
-        async def screamifyoulove(interaction: discord.Interaction, country: str, love: bool = True):
+        @self.tree.command(name="screamifyoulove", description="Scream if you love something!")
+        @discord.app_commands.describe(subject="What you love")
+        @discord.app_commands.describe(love="Do you love it?")
+        @discord.app_commands.autocomplete(subject=autocomplete_scream)
+        async def screamifyoulove(interaction: discord.Interaction, subject: str, love: bool = True):
             with open("screams.json", "r") as f:
                 screams = json.load(f)
-            if country not in screams:
-                await interaction.response.send_message(f"Sorry, I don't have a scream for {country}.", ephemeral=True)
+            lower = {key.lower(): key for key in screams.keys()}
+            if subject.lower() not in lower:
+                input_gif = f"{'love' if love else 'hate'}.gif"
+
+                if len(subject) < 15:
+                    text = f"Scream if you love {subject.replace('\n',' ')}"
+                elif len(subject) < 28:
+                    text = f"Scream if you love\n{subject.replace('\n',' ')}"
+                else:
+                    await interaction.response.send_message(f"Sorry <@{interaction.user.id}>, the thing you love can be at most 27 characters long.", ephemeral=True)
+
+                font_size_original = 30
+                try:
+                    font = ImageFont.truetype("arial.ttf", font_size_original)
+                except OSError:
+                    font = ImageFont.load_default(size=font_size_original)
+
+                gif = Image.open(input_gif)
+                width, _ = gif.size
+                frames = []
+                durations = []
+
+                for frame_index in range(gif.n_frames):
+                    gif.seek(frame_index)
+                    frame = gif.convert("RGBA")
+                    draw = ImageDraw.Draw(frame)
+
+                    if not love:
+                        draw.rectangle([(0, 60), (width, 120)], fill="white")
+
+                    bbox = draw.textbbox((0, 0), text, font=font, stroke_width=2)
+                    text_width = bbox[2] - bbox[0]
+                    text_height = bbox[3] - bbox[1]
+
+                    scale_factor = width / text_width * 1.003
+                    font_size = int(font_size_original * scale_factor)
+                    try:
+                        new_font = ImageFont.truetype("arial.ttf", font_size)
+                    except OSError:
+                        new_font = ImageFont.load_default(size=font_size)
+
+                    bbox = draw.textbbox((0, 0), text, font=new_font, stroke_width=2)
+                    text_width = bbox[2] - bbox[0]
+                    text_height = bbox[3] - bbox[1]
+
+                    x = (width - text_width) / 2
+                    if love:
+                        y = 35 - text_height / 2
+                    else:
+                        y = 90 - text_height / 2
+
+                    draw.text((x, y), text, font=new_font, fill="white", stroke_width=2, stroke_fill="black")
+
+                    if "nebraskan tangler" in subject.lower():
+                        img = Image.open('el_nebraskan_tangler.png').convert("RGB")
+                        if love:
+                            img = img.resize((100, 100), Image.LANCZOS)
+                            frame.paste(img, (155, 120))
+                        else:
+                            img = img.resize((200, 200), Image.LANCZOS)
+                            frame.paste(img, (285, 260))
+
+                    frames.append(frame.convert("P", palette=Image.Palette.ADAPTIVE))
+                    durations.append(gif.info.get("duration", 100))
+
+                buffer = BytesIO()
+
+                frames[0].save(buffer, format="GIF", save_all=True, append_images=frames[1:], duration=durations, loop=gif.info.get("loop", 0), optimize=False, disposal=2)
+
+                buffer.seek(0)
+                del screams
+                await interaction.response.send_message(f"<@{interaction.user.id}> {'loves' if love else "doesn't love"} {subject}!", file=discord.File(buffer, filename="screamifyoulove.gif"))            
                 return
             embed = discord.Embed()
-            embed.set_image(url=screams[country]["Love" if love else "Hate"])
+            embed.set_image(url=screams[lower[subject.lower()]]["Love" if love else "Hate"])
             del screams
-            await interaction.response.send_message(f"<@{interaction.user.id}> {'loves' if love else "doesn't love"} {country}!", embed=embed)
+            await interaction.response.send_message(f"<@{interaction.user.id}> {'loves' if love else "doesn't love"} {subject}!", embed=embed)
 
         @self.tree.command(name="punish", description="Punish a user!")
         @discord.app_commands.describe(user="The user to punish")
