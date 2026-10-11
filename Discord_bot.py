@@ -601,7 +601,7 @@ class MyClient(discord.Client):
             await client.close()
 
         @self.tree.context_menu(name="Remove bot message")
-        @discord.app_commands.checks.has_role(HUMAN_OVERLORD_ROLE_ID)
+        @discord.app_commands.checks.has_role(BOTBOUWER_ROLE_ID)
         async def removebotmessage(interaction: discord.Interaction, message: discord.Message,):
             try:
                 if message.author != client.user:
@@ -613,7 +613,18 @@ class MyClient(discord.Client):
                 await thread.send(f"{interaction.user.name} deleted a bot message: {message.content}.")
             except Exception as e:
                 await interaction.response.send_message(f"Error deleting message: {e}", ephemeral=True)
-        
+
+        @self.tree.command(name="talkasbot", description="Talk as the bot")
+        @discord.app_commands.describe(message="The message to send as the bot")
+        @discord.app_commands.checks.has_role(BOTBOUWER_ROLE_ID)
+        async def talkasbot(interaction: discord.Interaction, message: str):
+            if len(message) > 2000:
+                await interaction.response.send_message("Message is too long. Please keep it under 2000 characters.", ephemeral=True)
+                return
+            channel = interaction.channel
+            await channel.send(message)
+            await interaction.response.send_message("Message sent as the bot.", ephemeral=True)
+
         @self.tree.command(name="detectad", description="Let me know when you found a reddit post containing an advertisement")
         @discord.app_commands.describe(post_link="The link to the reddit post containing the advertisement")
         async def detectad(interaction: discord.Interaction, post_link: str):
