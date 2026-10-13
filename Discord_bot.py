@@ -521,14 +521,12 @@ class MyClient(discord.Client):
 
                     draw.text((x, y), text, font=new_font, fill="white", stroke_width=2, stroke_fill="black")
 
-                    if "nebraskan tangler" in subject.lower():
-                        img = Image.open('el_nebraskan_tangler.png').convert("RGB")
-                        if love:
-                            img = img.resize((100, 100), Image.LANCZOS)
-                            frame.paste(img, (155, 120))
-                        else:
-                            img = img.resize((200, 200), Image.LANCZOS)
-                            frame.paste(img, (285, 260))
+                    easter_eggs = json.load(open("easter_eggs/easter_eggs.json", "r"))
+                    for easter_egg in easter_eggs:
+                        if easter_egg in subject.lower():
+                            img = Image.open('easter_eggs/' + easter_eggs[easter_egg]['image']).convert("RGB")
+                            img = img.resize(easter_eggs[easter_egg]['resize']['love' if love else 'hate'], Image.LANCZOS)
+                            frame.paste(img, easter_eggs[easter_egg]['position']['love' if love else 'hate'])
 
                     frames.append(frame.convert("P", palette=Image.Palette.ADAPTIVE))
                     durations.append(gif.info.get("duration", 100))

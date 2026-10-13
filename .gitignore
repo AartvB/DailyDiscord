@@ -1,3 +1,4 @@
 *.db
 praw.ini
 .env
+easter_eggs*
