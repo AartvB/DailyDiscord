@@ -568,6 +568,7 @@ class MyClient(discord.Client):
                     text = f"Scream if you love\n{subject.replace('\n',' ')}"
                 else:
                     await interaction.response.send_message(f"Sorry <@{interaction.user.id}>, the thing you love can be at most 27 characters long.", ephemeral=True)
+                await interaction.response.defer(thinking=True)
 
                 font_size_original = 30
                 try:
@@ -627,7 +628,7 @@ class MyClient(discord.Client):
 
                 buffer.seek(0)
                 del screams
-                await interaction.response.send_message(f"<@{interaction.user.id}> {'loves' if love else "doesn't love"} {subject}!", file=discord.File(buffer, filename="screamifyoulove.gif"))            
+                await interaction.followup.send(f"<@{interaction.user.id}> {'loves' if love else "doesn't love"} {subject}!", file=discord.File(buffer, filename="screamifyoulove.gif"))            
                 return
             embed = discord.Embed()
             embed.set_image(url=screams[lower[subject.lower()]]["Love" if love else "Hate"])
