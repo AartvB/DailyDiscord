@@ -132,6 +132,50 @@ async def autocomplete_scream(interaction: discord.Interaction, current: str):
     del screams
     return result
 
+class ConfirmView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=15)
+        self.user_id = user_id
+        self.message = None
+
+    async def on_timeout(self):
+        if self.message:
+            await self.message.edit(content="❌ Cancelled due to timeout.", view=None)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("This confirmation isn't for you.", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Confirm", emoji="✅", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        with sqlite3.connect("DailyGamesPosts.db") as dg_conn, sqlite3.connect("rugby.db") as rugby_conn:
+            dg_cur = dg_conn.cursor()
+            rugby_cur = rugby_conn.cursor()
+            time_travel_pending, time_travel_activated, timestamp_next_minute, last_minute = rugby_cur.execute('SELECT time_travel_pending_until, time_travel_specialist_activated, timestamp_next_minute, last_minute FROM current_match_state').fetchone()
+            if time_travel_activated:
+                await interaction.response.send_message("A time travel specialist has already been activated.", ephemeral=True)
+                return
+            if time_travel_pending <= datetime.now().timestamp():
+                await interaction.response.send_message("It took you to long to confirm the time travel. The next minute has already started.", ephemeral=True)
+                return
+            rugby_cur.execute('UPDATE current_match_state SET time_travel_specialist_activated = 1')
+            rugby_cur.execute('UPDATE specialists SET uses_left = uses_left - 1 WHERE discord_user_id = ? AND specialist = "time"', (interaction.user.id,))
+            rugby_conn.commit()
+            team = rugby_cur.execute("SELECT team FROM specialists WHERE discord_user_id = ? AND specialist = 'time'", (interaction.user.id,)).fetchone()[0]
+            dg_cur.execute("INSERT INTO rugby_messages (scheduled_time, message) VALUES (?, ?)", (datetime.fromtimestamp(max(timestamp_next_minute, time_travel_pending + 1), tz=UTC_TZ).isoformat(),  f"<@{interaction.user.id}> ({team}) activated time travel! Minute {last_minute} will be replayed."))
+            dg_conn.commit()
+            thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
+            await thread.send(f"<@{interaction.user.id}> ({team}) activated time travel! Minute {last_minute} will be replayed.")
+            await interaction.response.edit_message(content="✅ Time travel confirmed!", embed=None, view=None)
+
+    @discord.ui.button(label="Cancel", emoji="❌", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
+        await thread.send(f"<@{interaction.user.id}> cancelled time travel.")
+        await interaction.response.edit_message(content="❌ Time travel cancelled.", embed=None, view=None)
+
 class MyClient(discord.Client):
     async def setup_hook(self):
         self.reddit = asyncpraw.Reddit('bot1')
@@ -176,7 +220,7 @@ class MyClient(discord.Client):
                     conn.commit()
                     await interaction.response.send_message(f"You have subscribed to '{text}'.", ephemeral=True)
                     thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
-                    await thread.send(f"{interaction.user.name} subscribed to '{text}'.")
+                    await thread.send(f"<@{interaction.user.id}> subscribed to '{text}'.")
             except Exception as e:
                 print(f"Error in subscribe: {e}")
                 await interaction.response.send_message(f"An error occurred while subscribing: {e}.", ephemeral=True)
@@ -199,7 +243,7 @@ class MyClient(discord.Client):
                         conn.commit()
                         await interaction.response.send_message(f"You have unsubscribed from '{text}'.", ephemeral=True)
                         thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
-                        await thread.send(f"{interaction.user.name} unsubscribed from '{text}'.")
+                        await thread.send(f"<@{interaction.user.id}> unsubscribed from '{text}'.")
             except Exception as e:
                 print(f"Error in unsubscribe: {e}")
                 await interaction.response.send_message(f"An error occurred while unsubscribing: {e}.", ephemeral=True)
@@ -217,7 +261,7 @@ class MyClient(discord.Client):
                     else:
                         await interaction.response.send_message("You are not subscribed to any series.", ephemeral=True)
                     thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
-                    await thread.send(f"{interaction.user.name} viewed their subscriptions.")
+                    await thread.send(f"<@{interaction.user.id}> viewed their subscriptions.")
             except Exception as e:
                 print(f"Error in viewSubscriptions: {e}")
                 await interaction.response.send_message(f"An error occurred while viewing subscriptions: {e}.", ephemeral=True)
@@ -245,7 +289,7 @@ class MyClient(discord.Client):
                     conn.commit()
                     await interaction.response.send_message(f"You have subscribed to '{text}'.", ephemeral=True)
                     thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
-                    await thread.send(f"{interaction.user.name} subscribed to '{text}'.")
+                    await thread.send(f"<@{interaction.user.id}> subscribed to '{text}'.")
             except Exception as e:
                 print(f"Error in rugbysubscribe: {e}")
                 await interaction.response.send_message(f"An error occurred while subscribing: {e}.", ephemeral=True)
@@ -268,7 +312,7 @@ class MyClient(discord.Client):
                         conn.commit()
                         await interaction.response.send_message(f"You have unsubscribed from '{text}'.", ephemeral=True)
                         thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
-                        await thread.send(f"{interaction.user.name} unsubscribed from '{text}'.")
+                        await thread.send(f"<@{interaction.user.id}> unsubscribed from '{text}'.")
             except Exception as e:
                 print(f"Error in rugbyunsubscribe: {e}")
                 await interaction.response.send_message(f"An error occurred while unsubscribing: {e}.", ephemeral=True)
@@ -285,21 +329,23 @@ class MyClient(discord.Client):
                 if not dr.match_is_ongoing():
                     await interaction.response.send_message("There is no ongoing match to get a description for.", ephemeral=True)
                     return
-                
-                if number is not None and (number < 1 or number > 23):
-                    await interaction.response.send_message("Player number must be between 1 and 23.", ephemeral=True)
-                    return
+
                 teams = dr.cursor().execute("SELECT teamA, teamB FROM current_match_state").fetchone()
                 if team not in teams:
                     await interaction.response.send_message(f"{team} is not playing in the current match.", ephemeral=True)
                     return
 
                 if number is not None:
+                    player_numbers = [r[0] for r in dr.cursor().execute("SELECT number FROM players WHERE team = ?", (team,)).fetchall()]
+                    if number not in player_numbers:
+                        await interaction.response.send_message(f"Player number {number} is not in the team {team}. Available player numbers: {', '.join(map(str, player_numbers))}", ephemeral=True)
+                        return
                     await interaction.response.send_message(dr.get_player_description_long(team, number), ephemeral=private)
                 else:
                     await interaction.response.send_message(dr.get_team_description(team, probabilities), ephemeral=private)
+
                 thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
-                await thread.send(f"{interaction.user.name} requested the description for {team} (player number: {number if number else 'N/A'}, probabilities: {'Yes' if probabilities else 'No'}).")
+                await thread.send(f"<@{interaction.user.id}> requested the description for {team} (player number: {number if number else 'N/A'}, probabilities: {'Yes' if probabilities else 'No'}).")
                 del dr
             except Exception as e:
                 print(f"Error in getrugbydescription: {e}")
@@ -320,7 +366,7 @@ class MyClient(discord.Client):
                     return
 
                 if yell is not None and len(yell) > 1500:
-                    await interaction.response.send_message("Your cheer is too long. Please limit it to 1500 characters.", ephemeral=True)
+                    await interaction.response.send_message("Your yell is too long. Please limit it to 1500 characters.", ephemeral=True)
                     return
                 
                 teams = dr.cursor().execute("SELECT teamA, teamB FROM current_match_state").fetchone()
@@ -329,27 +375,71 @@ class MyClient(discord.Client):
                     return
 
                 user_id = interaction.user.id
-                number_of_cheers = dr.cursor().execute("SELECT COUNT(uses_left) FROM cheers WHERE user_id = ?", (user_id,)).fetchone()[0]
-                bonus_cheers = ('supporter' in [s[0] for s in dr.cursor().execute('SELECT specialist FROM specialists WHERE discord_user_id = ?', (user_id,)).fetchall()]) * 3
+                number_of_cheers = dr.cursor().execute("SELECT COUNT(minutes_left) FROM cheers WHERE user_id = ?", (user_id,)).fetchone()[0]
+                has_supporter_specialist = 'supporter' in [s[0] for s in dr.cursor().execute('SELECT specialist FROM specialists WHERE discord_user_id = ?', (user_id,)).fetchall()]
+                bonus_cheers = (has_supporter_specialist) * 2
+                bonus_minutes = (has_supporter_specialist) * 1
                 if number_of_cheers >= 3 + bonus_cheers:
                     await interaction.response.send_message(f"You have already cheered {3 + bonus_cheers} times, you can only cheer {3 + bonus_cheers} times per match.", ephemeral=True)
                     return
 
-                user_is_cheering = dr.cursor().execute("SELECT COUNT(uses_left) FROM cheers WHERE user_id = ? AND uses_left > 0", (user_id,)).fetchone()[0] > 0
+                user_is_cheering = dr.cursor().execute("SELECT COUNT(minutes_left) FROM cheers WHERE user_id = ? AND minutes_left > 0", (user_id,)).fetchone()[0] > 0
                 if user_is_cheering:
-                    await interaction.response.send_message("You are still cheering, you can only cheer once per two minutes.", ephemeral=True)
+                    await interaction.response.send_message(f"You are still cheering, you can only cheer once per {'two' if bonus_minutes == 0 else 'three'} minutes.", ephemeral=True)
                     return
                 
                 next_minute = dr.cursor().execute("SELECT last_minute FROM current_match_state").fetchone()[0] + 1
-                dr.cursor().execute("INSERT INTO cheers (user_id, minute, uses_left, team, yell) VALUES (?, ?, 2, ?, ?)", (user_id, next_minute, team, yell))
+                dr.cursor().execute("INSERT INTO cheers (user_id, minute, minutes_left, team, yell, strength) VALUES (?, ?, ?, ?, ?, ?)", (user_id, next_minute, 2 + bonus_minutes, team, yell, 1 + has_supporter_specialist))
                 dr.conn().commit()
                 await interaction.response.send_message(f"Your cheer for {team} has been scheduled! You have {3 + bonus_cheers - number_of_cheers - 1} cheer{'s' if 3 + bonus_cheers - number_of_cheers - 1 != 1 else ''} left.", ephemeral=True)
                 thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
-                await thread.send(f"{interaction.user.name} cheered for {team}!")
+                await thread.send(f"<@{interaction.user.id}> cheered for {team}!")
                 del dr
             except Exception as e:
                 print(f"Error in cheer: {e}")
                 await interaction.response.send_message(f"An error occurred while cheering: {e}.", ephemeral=True)
+
+        @self.tree.command(name="rugbyrewind", description="Rewind one minute of the rugby match")
+        async def rugbyrewind(interaction: discord.Interaction):
+            try:
+                dr = DailyRugby()
+                if not dr.match_is_ongoing() or dr.cursor().execute("SELECT match_has_finished FROM current_match_state").fetchone()[0] == 1:
+                    await interaction.response.send_message("There is no ongoing match to rewind.", ephemeral=True)
+                    return
+
+                user_id = interaction.user.id
+                has_active_time_specialist = 'time' in [s[0] for s in dr.cursor().execute('SELECT specialist FROM specialists WHERE discord_user_id = ? AND uses_left > 0', (user_id,)).fetchall()]
+                if not has_active_time_specialist:
+                    await interaction.response.send_message("You do not have a time specialist to rewind the match, or you have used all of your uses.", ephemeral=True)
+                    return
+
+                minute = dr.cursor().execute('SELECT last_minute FROM current_match_state').fetchone()[0]
+                if minute == -1:
+                    await interaction.response.send_message("There is no ongoing match to rewind.", ephemeral=True)
+                    return
+
+                time_till = int(datetime.now().timestamp()) + 15
+                dr.cursor().execute(f"UPDATE current_match_state SET time_travel_pending_until = {time_till}")
+                dr.conn().commit()
+
+                embed = discord.Embed(
+                    title="Confirm time travel",
+                    description=f"Are you sure you want to travel back in time to repeat minute {minute}? This will use one of your time specialist's uses. You currently have {dr.cursor().execute('SELECT uses_left FROM specialists WHERE discord_user_id = ? AND specialist = ?', (user_id, 'time')).fetchone()[0]} use(s) left. You have to decide before <t:{time_till}:R>.",
+                    color=discord.Color.orange(),
+                )
+
+                view = ConfirmView(user_id=interaction.user.id)
+
+                await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+                view.message = await interaction.original_response()
+
+                thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
+                await thread.send(f"<@{interaction.user.id}> started to activate a time specialist!")
+                del dr
+            except Exception as e:
+                print(f"Error in rugbyrewind: {e}")
+                await interaction.response.send_message(f"An error occurred while requesting a rewind of the match: {e}.", ephemeral=True)
 
         @self.tree.command(name="addseries", description="Add a new DailyGame to subscribe to")
         @discord.app_commands.describe(text="The name of the new series")
@@ -369,7 +459,7 @@ class MyClient(discord.Client):
                         thread = await client.fetch_channel(NEW_POST_CHANNEL_ID)
                         await thread.send(f"It is now possible to subscribe to the series named {text}!")
                     thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
-                    await thread.send(f"{interaction.user.name} added a new series: '{text}'.")
+                    await thread.send(f"<@{interaction.user.id}> added a new series: '{text}'.")
             except Exception as e:
                 print(f"Error in addSeries: {e}")
                 await interaction.response.send_message(f"An error occurred while adding the series: {e}.", ephemeral=True)
@@ -404,7 +494,7 @@ class MyClient(discord.Client):
                             thread = await client.fetch_channel(NEW_POST_CHANNEL_ID)
                             await thread.send(f"The series '{old_name}' has been renamed to '{new_name}'.")
                             thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
-                            await thread.send(f"{interaction.user.name} renamed series '{old_name}' to '{new_name}'.")
+                            await thread.send(f"<@{interaction.user.id}> renamed series '{old_name}' to '{new_name}'.")
             except Exception as e:
                 print(f"Error in renameSeries: {e}")
                 await interaction.response.send_message(f"An error occurred while renaming the series: {e}.", ephemeral=True)
@@ -456,7 +546,7 @@ class MyClient(discord.Client):
                             await interaction.response.send_message(f"Series '{series_name}' not found.", ephemeral=True)
                     conn.commit()
                     thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
-                    await thread.send(f"{interaction.user.name} added post '{postid}' to series '{series_name}'.")
+                    await thread.send(f"<@{interaction.user.id}> added post '{postid}' to series '{series_name}'.")
             except Exception as e:
                 print(f"Error in addposttoseries: {e}")
                 await interaction.response.send_message(f"An error occurred while adding the post to the series: {e}.", ephemeral=True)
@@ -608,7 +698,7 @@ class MyClient(discord.Client):
                 await message.delete()
                 await interaction.response.send_message("Message deleted successfully.", ephemeral=True)
                 thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
-                await thread.send(f"{interaction.user.name} deleted a bot message: {message.content}.")
+                await thread.send(f"<@{interaction.user.id}> deleted a bot message: {message.content}.")
             except Exception as e:
                 await interaction.response.send_message(f"Error deleting message: {e}", ephemeral=True)
 
@@ -653,7 +743,7 @@ class MyClient(discord.Client):
                 await thread.send(f"A new advertisement was posted on r/dailygames {int(days_since_post)} days, {int(hours_since_post)} hours, {int(minutes_since_post)} minutes, and {int(seconds_since_post)} seconds ago. It has been {int(days)} days, {int(hours)} hours, {int(minutes)} minutes, and {int(seconds)} seconds since the last one.")
                 await interaction.response.send_message(f"Thank you for reporting the advertisement. I have recorded it and notified the appropriate channel.", ephemeral=True)
                 thread = await client.fetch_channel(REPORT_ACTIONS_CHANNEL_ID)
-                await thread.send(f"{interaction.user.name} reported a new advertisement: {post_link}.")
+                await thread.send(f"<@{interaction.user.id}> reported a new advertisement: {post_link}.")
             except Exception as e:
                 print(f"Error in detectad: {e}")
                 await interaction.response.send_message(f"An error occurred while processing the advertisement: {e}.", ephemeral=True)
@@ -956,6 +1046,7 @@ async def on_ready():
         client.tree.clear_commands(guild=guild)  # Clear global commands
         await client.tree.sync(guild=guild)  # Sync to clear guild-specific commands
         print(f"- {guild.name} (ID: {guild.id})")
+        '''
         print(f"Channels in {guild.name}:")
         if guild.id not in [666183635556368384, 1292147569908125816, 666182291512623115]:
             print(f"Channels in {guild.name}:")
@@ -976,4 +1067,5 @@ async def on_ready():
                                 f.write(f"{message.created_at} - {message.author}: {message.content}\n")
                     except:
                         pass
+        '''
 client.run(TOKEN)
