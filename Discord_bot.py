@@ -682,6 +682,24 @@ class MyClient(discord.Client):
             del p
             await interaction.response.send_message(punishment)
 
+        @self.tree.command(name="slotmachine", description="Spin the slot machine!")
+        async def slotmachine(interaction: discord.Interaction):
+            emojis = [
+                "<:Evan:1314782841229414521>",
+                "<:idol:1560456411203371108>",
+                "<:logo:1411160574456238090>",
+                "<:Thomas:1325912840321630250>",
+                "<:michael:1542337310358642758>",
+                "<:cooler_michael:1542337348484726805>",
+                "<:Zizi:1314781050991280211>",
+                "<:pumpkin:1555366731264823357>",
+                ":carousel_horse:",
+                ":rugby_football:"
+            ]
+        
+            result = " ".join(random.choices(emojis, k=3))
+            await interaction.response.send_message(result)
+        
         @self.tree.command(name="restart", description="Restart the bot")
         @discord.app_commands.checks.has_role(BOTBOUWER_ROLE_ID)
         async def restart(interaction: discord.Interaction):
