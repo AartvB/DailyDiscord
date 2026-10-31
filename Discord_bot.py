@@ -40,6 +40,7 @@ TEST_CHANNEL_ID = os.getenv('TEST_CHANNEL_ID')
 REPORT_ACTIONS_CHANNEL_ID = os.getenv('REPORT_ACTIONS_CHANNEL_ID')
 REPORT_STATUS_CHANNEL_ID = os.getenv('REPORT_STATUS_CHANNEL_ID')
 ADVERTISEMENT_CHANNEL_ID = os.getenv('ADVERTISEMENT_CHANNEL_ID')
+COUNT_CHANNEL_ID = int(os.getenv('COUNT_CHANNEL_ID'))
 HUMAN_OVERLORD_ROLE_ID = int(os.getenv('HUMAN_OVERLORD_ROLE_ID'))
 BOTBOUWER_ROLE_ID = int(os.getenv('BOTBOUWER_ROLE_ID'))
 DAILY_GAMES_ID = int(os.getenv('DAILY_GAMES_ID'))
@@ -116,6 +117,8 @@ def setup_database():
         cursor.execute('CREATE TABLE IF NOT EXISTS rugbymatchsubscriptions (userid INTEGER, matchname TEXT, PRIMARY KEY (userid, matchname))')
         cursor.execute('CREATE TABLE IF NOT EXISTS series (name TEXT PRIMARY KEY)')
         cursor.execute('CREATE TABLE IF NOT EXISTS subscriptions (userid INTEGER, seriesname TEXT, platform TEXT, PRIMARY KEY (userid, seriesname, platform))')
+        cursor.execute('CREATE TABLE IF NOT EXISTS counts (userid INTEGER, count INTEGER, PRIMARY KEY (count))')
+        cursor.execute('CREATE TABLE IF NOT EXISTS count_leaderboard (commentid INTEGER PRIMARY KEY)')
         conn.commit()
         if (cursor.execute('SELECT COUNT(*) FROM currentmatch').fetchone()[0] == 0):
             cursor.execute('INSERT INTO currentmatch (matchname) VALUES (?)', ('Test',))
@@ -699,7 +702,45 @@ class MyClient(discord.Client):
         
             result = " ".join(random.choices(emojis, k=3))
             await interaction.response.send_message(result)
-        
+
+        @self.tree.command(name='count', description='Count')
+        async def count(interaction: discord.Interaction):
+            channel_id = interaction.channel.id
+            if channel_id != COUNT_CHANNEL_ID:
+                await interaction.response.send_message(f"This command can only be used in <#{COUNT_CHANNEL_ID}>.", ephemeral=True)
+                return
+            with sqlite3.connect("DailyGamesPosts.db") as conn:
+                cursor = conn.cursor()
+                attempts = 0
+                while attempts < 8:
+                    attempts += 1
+                    userid = interaction.user.id
+                    latest_count = cursor.execute("SELECT userid, count FROM counts ORDER BY count DESC LIMIT 1").fetchone()
+                    if latest_count:
+                        if latest_count[0] == userid:
+                            await interaction.response.send_message(f"You were the last person to count, please wait for someone else to count.", ephemeral=True)
+                            return
+                        new_count = latest_count[1] + 1
+                    else:
+                        new_count = 1
+                    cursor.execute("INSERT INTO counts (userid, count) VALUES (?, ?)", (userid, new_count))
+                    conn.commit()
+                    leaderboard_text = "Count Leaderboard:\n"
+                    leaderboard = cursor.execute("SELECT userid, COUNT(*) FROM counts GROUP BY userid ORDER BY COUNT(*) DESC LIMIT 10").fetchall()
+                    for user, count in leaderboard:
+                        leaderboard_text += f"<@{user}>: {count}\n"
+                    leaderboard_comment_id = cursor.execute("SELECT commentid FROM count_leaderboard").fetchone()
+                    if leaderboard_comment_id:
+                        comment = await interaction.channel.fetch_message(leaderboard_comment_id[0])
+                        await comment.edit(content=leaderboard_text, allowed_mentions=discord.AllowedMentions.none())
+                    else:
+                        comment = await interaction.channel.send(leaderboard_text, allowed_mentions=discord.AllowedMentions.none())
+                        cursor.execute("INSERT INTO count_leaderboard (commentid) VALUES (?)", (comment.id,))
+                        conn.commit()
+                    await interaction.response.send_message(new_count, ephemeral=False)
+                    return
+                await interaction.response.send_message("Failed to count after 8 attempts.", ephemeral=True)
+
         @self.tree.command(name="restart", description="Restart the bot")
         @discord.app_commands.checks.has_role(BOTBOUWER_ROLE_ID)
         async def restart(interaction: discord.Interaction):
@@ -1041,11 +1082,13 @@ async def on_ready():
 #        rugby_cur = rugby_conn.cursor()
 #        rugby_cur.execute("UPDATE players SET is_on_field = 0 WHERE number = 23 AND team = 'AXOLOTLSTHE1'")
 #        rugby_conn.commit()
-#    guild = discord.Object(id=1292147569908125816) # DailyGames server
+#    guildid = 666182291512623115 # test Server
+#    guildid = 1292147569908125816 # DailyGames Server
+#    guild = discord.Object(id=guildid) # Test server
 #    client.tree.copy_global_to(guild=guild)
 #    await client.tree.sync(guild=guild)
 #    print("Slash commands synced locally.")
-#    await client.tree.clear_commands(guild=discord.Object(id=1292147569908125816))
+#    await client.tree.clear_commands(guild=discord.Object(id=guildid))
 
     await client.tree.sync()
     print("Slash commands synced globally.")
