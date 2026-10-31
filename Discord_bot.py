@@ -1078,10 +1078,6 @@ async def on_ready():
     setup_database()
     print(f'Logged in as {client.user} (ID: {client.user.id})')
 
-#    with sqlite3.connect("rugby.db") as rugby_conn:
-#        rugby_cur = rugby_conn.cursor()
-#        rugby_cur.execute("UPDATE players SET is_on_field = 0 WHERE number = 23 AND team = 'AXOLOTLSTHE1'")
-#        rugby_conn.commit()
 #    guildid = 666182291512623115 # test Server
 #    guildid = 1292147569908125816 # DailyGames Server
 #    guild = discord.Object(id=guildid) # Test server
